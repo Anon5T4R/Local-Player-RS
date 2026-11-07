@@ -66,6 +66,7 @@ jobs:
           # Nomes no padrão da suíte, que o updater (craft_update) parseia:
           # <app>-<version>-<os>-<arch>.<ext>
           if ls ./*.AppImage 1>/dev/null 2>&1; then
+            rm -f linuxdeploy-x86_64.AppImage
             mv ./*.AppImage "out/local-player-rs-$version-linux-x86_64.AppImage"
           fi
           tar -czf "out/local-player-rs-$version-linux-x86_64.tar.gz" -C "target/release" local-player-rs
