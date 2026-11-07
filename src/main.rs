@@ -13,14 +13,18 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod engine;
+mod metrics;
 mod queue;
 mod resume;
+mod session_log;
 mod subtitle;
 mod video;
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -65,10 +69,23 @@ fn main() -> eframe::Result<()> {
         std::process::exit(i32::from(result.is_err()));
     }
 
-    let cfg = config::load(APP_ID);
-
     // "Abrir com" do Windows manda os caminhos como args (pode ser mais de um).
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Teto do cache de frames do fork ANTES de qualquer faixa abrir (o fork lê
+    // a configuração na criação do cache).
+    engine::configure_frame_cache();
+
+    // Diagnóstico sem janela: --probe / --bench / --help / --version saem aqui.
+    if let Some(code) = cli::run(&args) {
+        std::process::exit(code);
+    }
+
+    // Contadores permanentes: motor, decode de vídeo e UI compartilham o mesmo
+    // `Arc<Metrics>` (overlay da tecla D e CSV de LOCALPLAYER_STATS).
+    let metrics = Arc::new(metrics::Metrics::new());
+
+    let cfg = config::load(APP_ID);
 
     let mut viewport = egui::ViewportBuilder::default().with_title(APP.name).with_inner_size([480.0, 600.0]);
     // Ícone da janela (o .exe já cunha o mesmo no build.rs — Resources).
@@ -102,7 +119,7 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             theme::apply(&cc.egui_ctx, cfg.theme);
-            let mut app = PlayerApp::new(cfg, args, cc.wgpu_render_state.as_ref());
+            let mut app = PlayerApp::new(cfg, args, cc.wgpu_render_state.as_ref(), metrics);
             // Check de update no arranque: achou release nova, o prompt do
             // updater abre sozinho (craft_update::dialog).
             app.updater.check_at_start(&cc.egui_ctx);
@@ -199,10 +216,18 @@ struct PlayerApp {
     subtitles_on: bool,
     /// Atraso da legenda em segundos (+ = aparece depois; Z/X ±0,5 s).
     subtitle_delay: f64,
+    /// Contadores de desempenho compartilhados com o motor e a thread de decode.
+    metrics: Arc<metrics::Metrics>,
+    /// Overlay de estatísticas (tecla D).
+    show_stats: bool,
+    /// Log automático de sessão/anomalias (sempre ligado; ver `session_log.rs`).
+    session: session_log::SessionLog,
+    /// PTS do último frame que foi para a tela (detecta stall com fila vazia).
+    last_video_pts: f64,
 }
 
 impl PlayerApp {
-    fn new(cfg: Config, args: Vec<String>, render_state: Option<&eframe::egui_wgpu::RenderState>) -> Self {
+    fn new(cfg: Config, args: Vec<String>, render_state: Option<&eframe::egui_wgpu::RenderState>, metrics: Arc<metrics::Metrics>) -> Self {
         // "Abrir com": adiciona os arquivos de args na playlist e seleciona o
         // primeiro.
         let mut playlist = resume::load_playlist();
@@ -226,7 +251,7 @@ impl PlayerApp {
         // Volume/mute persistem entre sessões e valem já no primeiro play.
         let prefs = resume::load_prefs();
         let volume = prefs.volume.clamp(0.0, 100.0);
-        let mut engine = engine::PlayerEngine::new();
+        let mut engine = engine::PlayerEngine::new(metrics.clone());
         engine.set_volume((volume / 100.0) as f32);
         engine.set_muted(prefs.muted);
 
@@ -261,6 +286,10 @@ impl PlayerApp {
             subtitles: None,
             subtitles_on: true,
             subtitle_delay: 0.0,
+            metrics,
+            show_stats: false,
+            session: session_log::SessionLog::new(),
+            last_video_pts: 0.0,
         };
         if let Some(i) = idx {
             app.select(i);
@@ -283,6 +312,7 @@ impl PlayerApp {
         self.scrubbing = false;
         self.pending_resume = start;
         self.drop_video();
+        self.last_video_pts = start;
         self.engine.play(&path, start);
     }
 
@@ -334,6 +364,8 @@ impl PlayerApp {
             v.seek(secs);
         }
         self.video_frames.clear();
+        // Relógio saltou: o "atraso" do frame antigo não é travada.
+        self.last_video_pts = secs;
         // Em pausa não há repaint contínuo: repinta um instante para o frame
         // parado no novo ponto aparecer.
         self.seek_preview_until = Some(Instant::now() + Duration::from_millis(800));
@@ -392,6 +424,13 @@ impl PlayerApp {
             engine::Event::DurationKnown(d) => {
                 self.duration = d;
                 self.error_streak = 0;
+                // Sessão de reprodução: linha com data/arquivo/codec/res/fps no
+                // log automático (os metadados chegam pelo `Metrics` do motor).
+                if let Some(path) = self.idx.and_then(|i| self.playlist.files.get(i)).cloned() {
+                    if let Some(info) = self.metrics.snapshot().track {
+                        self.session.track(&path, &info);
+                    }
+                }
                 // Posição salva caiu no fim (ou além do fim): recomeça do zero.
                 if self.pending_resume > 0.0 && d > 0.0 && self.pending_resume >= d - 3.0 {
                     self.pending_resume = 0.0;
@@ -414,6 +453,10 @@ impl PlayerApp {
             }
             engine::Event::TrackEnded => self.on_track_ended(),
             engine::Event::Error(e) => {
+                // Thread do motor morta = anomalia no log automático.
+                if e.kind() == engine::ErrorKind::Engine {
+                    self.session.engine_dead(&e.to_string());
+                }
                 // Seek falho não conta para o "pula a playlist" (a faixa toca).
                 if e.kind() != engine::ErrorKind::Seek {
                     self.error_streak += 1;
@@ -438,6 +481,7 @@ impl PlayerApp {
         self.video_frames.clear();
         self.video_shown = false;
         self.seek_preview_until = None;
+        self.last_video_pts = 0.0;
         // Sem imagem não há onde desenhar a legenda (e o atraso é por faixa).
         self.subtitles = None;
         self.subtitle_delay = 0.0;
@@ -485,7 +529,7 @@ impl PlayerApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (f, r, space, m, left, right, esc, shift, s, z, x) = ctx.input(|i| {
+        let (f, r, space, m, left, right, esc, shift, s, z, x, d) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::F),
                 i.key_pressed(egui::Key::R),
@@ -498,6 +542,7 @@ impl PlayerApp {
                 i.key_pressed(egui::Key::S),
                 i.key_pressed(egui::Key::Z),
                 i.key_pressed(egui::Key::X),
+                i.key_pressed(egui::Key::D),
             )
         });
         if f {
@@ -505,6 +550,11 @@ impl PlayerApp {
         }
         if esc && self.fullscreen {
             self.set_fullscreen(ctx, false);
+        }
+        if d {
+            // Overlay de diagnóstico (tecla D), só com vídeo.
+            self.show_stats = !self.show_stats;
+            ctx.request_repaint();
         }
         if r {
             self.rotate(ctx, if shift { -1 } else { 1 });
@@ -606,19 +656,44 @@ impl PlayerApp {
         }
 
         let clock = self.engine.position_now();
+        // Política de skip: sempre o frame mais novo já vencido; o backlog vira
+        // descarte (`dropped`), nunca reprodução acelerada para "correr atrás".
+        // Como todo frame vencido sai da fila aqui, a profundidade que sobra é
+        // só de frames futuros — limitada pelo pacing do decode (lead de 250 ms).
+        let decision = video::present::take_due(&mut self.video_frames, clock, video::present::LATE_WINDOW);
+        if decision.dropped > 0 {
+            self.metrics.note_dropped(decision.dropped as u64, decision.dropped_late as u64);
+            self.session.dropped(decision.dropped, self.video_frames.len());
+        }
+        self.metrics.set_ring_depth(self.video_frames.len());
+
         let mut uploaded = false;
-        // Descarta no máximo o ring inteiro por tick: um atraso grande não
-        // segura a fila, e o frame atual fica na tela até o próximo vencer.
-        if let Some(frame) = video::present::take_due(&mut self.video_frames, clock, 3) {
+        if let Some(frame) = decision.frame {
+            self.metrics.note_late(decision.late);
+            self.session.late(decision.late);
+            let frame_pts = frame.pts;
             if let Some(gpu) = &self.video_gpu {
+                let started = Instant::now();
                 match gpu.upload(&frame, par, self.rotation) {
                     Ok(()) => {
+                        let elapsed = started.elapsed();
+                        self.metrics.note_upload(elapsed);
+                        self.session.upload(elapsed);
+                        self.metrics.note_presented();
                         self.video_shown = true;
+                        self.last_video_pts = frame_pts;
                         uploaded = true;
                     }
                     Err(video::gpu::UploadError::TooLarge(detail)) => failure = Some((engine::ErrorKind::TooLarge, detail)),
                     Err(video::gpu::UploadError::Invalid(detail)) => failure = Some((engine::ErrorKind::Decode, detail)),
                 }
+            }
+        } else if self.transport.is_playing() {
+            // Fila vazia mas o relógio andou: o vídeo está parado (decode
+            // travado/abertura lenta) mesmo sem frame atrasado para medir.
+            let behind = clock - self.last_video_pts;
+            if behind > video::present::LATE_WINDOW {
+                self.session.late(behind);
             }
         }
 
@@ -658,7 +733,56 @@ impl PlayerApp {
             }
             self.show_subtitle(ui, rect);
         }
+        if self.show_stats {
+            self.stats_overlay(ui, rect);
+        }
         // Senão: preto até o primeiro frame (o decode leva poucos ms).
+    }
+
+    /// Overlay técnico da tecla D (inglês monoespaçado de propósito: é
+    /// diagnóstico, não UI de produto — logo não passa pelo i18n).
+    fn stats_overlay(&self, ui: &egui::Ui, rect: egui::Rect) {
+        use std::fmt::Write as _;
+        let s = self.metrics.snapshot();
+        let mut text = String::new();
+        if let Some(t) = &s.track {
+            let _ = writeln!(
+                text,
+                "{} {}x{} {:.3} fps  {}  {}",
+                t.video_codec.as_deref().unwrap_or("-"),
+                t.width,
+                t.height,
+                t.fps,
+                t.container,
+                fmt_time(t.duration)
+            );
+            let audio = t.audio_codec.as_deref().unwrap_or("no audio");
+            let bitrate = t.bitrate.map_or(0.0, |b| b as f64 / 1e6);
+            let size = t.file_size.map_or(0.0, |b| b as f64 / (1024.0 * 1024.0));
+            let _ = writeln!(text, "audio {}  {bitrate:.2} Mb/s  file {size:.0} MB", audio);
+        }
+        let _ = writeln!(
+            text,
+            "decode  {:6.1} fps  avg {:5.2} ms  p95 {:5.2} ms  max {:6.2} ms",
+            s.decode_fps, s.decode_avg_ms, s.decode_p95_ms, s.decode_max_ms
+        );
+        let _ = writeln!(
+            text,
+            "present {:6.1} fps  shown {}  drop {} (late {})  late {:+.0} ms  ring {}",
+            s.display_fps, s.presented, s.dropped, s.dropped_late, s.late_ms, s.ring_depth
+        );
+        let _ = writeln!(
+            text,
+            "upload  {:5.2} ms  avg {:5.2}  max {:6.2}  repaint {:5.1} ms ({:.1} Hz)",
+            s.upload_ms, s.upload_avg_ms, s.upload_max_ms, s.repaint_ms, s.repaint_fps
+        );
+        let _ = writeln!(text, "rss {:6.0} MB  peak {:6.0} MB  cache {:6.1} MB", s.rss_mb, s.rss_peak_mb, s.cache_mb);
+        let galley = ui.painter().layout_no_wrap(text, egui::FontId::monospace(12.0), egui::Color32::from_gray(235));
+        let pad = egui::vec2(10.0, 8.0);
+        let bg = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), galley.size() + pad * 2.0);
+        let painter = ui.painter();
+        painter.rect_filled(bg, egui::CornerRadius::same(6), egui::Color32::from_black_alpha(190));
+        painter.galley(bg.min + pad, galley, egui::Color32::from_gray(235));
     }
 
     /// Legenda por cima do vídeo: dentro do letterbox, na base, com caixa
@@ -788,12 +912,19 @@ impl Drop for PlayerApp {
         self.remember_current();
         resume::save(&self.resume);
         self.save_prefs();
+        // Fecha o log automático (sem playback, não há arquivo para fechar).
+        self.session.end();
     }
 }
 
 impl eframe::App for PlayerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = &ui.ctx().clone();
+        // Instrumentação permanente: taxas/cadência e o CSV de LOCALPLAYER_STATS.
+        self.metrics.note_repaint();
+        self.metrics.tick(Instant::now());
+        // Log automático: pressão de memória (amostra a cada 5 s).
+        self.session.check_rss();
         // Update (craft_update): bombeia o check/instalação que rodam fora
         // da UI thread (mesmo desenho do Local-Keys).
         self.updater.tick(ctx);
@@ -809,12 +940,22 @@ impl eframe::App for PlayerApp {
         }
         self.pump_video(ctx);
 
-        // Cadência de repaint: vídeo toca a ~120 Hz (o vsync limita); áudio a
-        // 10 Hz basta para a barra de seek.
+        // Cadência de repaint: com vídeo, acorda quando o próximo frame vence
+        // (não a 120 Hz fixos: repaint à toa compete com o decode pela CPU e
+        // pela GPU — H3). Áudio puro a 10 Hz basta para a barra de seek.
         let previewing = self.seek_preview_until.is_some_and(|t| Instant::now() < t);
         if self.transport.is_playing() {
-            let ms = if self.video.is_some() { 8 } else { 100 };
-            ctx.request_repaint_after(Duration::from_millis(ms));
+            if self.video.is_some() {
+                let clock = self.engine.position_now();
+                let wait_ms = match self.video_frames.front() {
+                    Some(next) => ((next.pts - clock) * 1_000.0).clamp(4.0, 50.0) as u64,
+                    // Fila vazia: acorda cedo para drenar o canal do decode.
+                    None => 8,
+                };
+                ctx.request_repaint_after(Duration::from_millis(wait_ms));
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
         } else if previewing {
             // Seek em pausa: repinta uns frames para o frame parado aparecer.
             ctx.request_repaint_after(Duration::from_millis(16));

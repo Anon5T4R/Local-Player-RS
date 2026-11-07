@@ -29,6 +29,7 @@
 //! [`ErrorKind::Seek`] sem derrubar nada.
 
 mod decoder;
+mod diag;
 mod error;
 mod output;
 mod resample;
@@ -36,18 +37,37 @@ mod ring;
 mod transport;
 mod video;
 
+pub use diag::{bench, probe, BenchReport, ProbeReport};
 pub use error::{EngineError, ErrorKind};
 pub use transport::Transport;
 pub use video::{VideoInfo, VideoMsg, VideoPipeline};
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::metrics::{Metrics, TrackInfo};
 use resample::LinearResampler;
 use ring::{secs_to_frames, SampleRing};
+
+/// Teto do cache de frames decodificados do fork do FilmCraft (por faixa).
+///
+/// O fork já tem teto (384 MB por cache / 1 GB no processo), mas para um player
+/// isso é folgado demais: 384 MB de frames + o working set do decoder + a UI é
+/// o que uma máquina pequena sente como "quase congelou". O padrão aqui é
+/// 128 MB; `LOCALPLAYER_FRAME_CACHE_MB` ajusta (0 = teto original do fork).
+const DEFAULT_FRAME_CACHE_MB: usize = 128;
+
+/// Aplica o orçamento do cache de frames (chamado no arranque, antes de abrir
+/// qualquer faixa: o fork lê a configuração ao criar o cache).
+pub fn configure_frame_cache() {
+    let mb = std::env::var("LOCALPLAYER_FRAME_CACHE_MB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(DEFAULT_FRAME_CACHE_MB);
+    let bytes = mb.saturating_mul(1024 * 1024);
+    filmcraft_codecs::gop::set_frame_cache_budget(bytes);
+}
 
 /// Comandos da UI para o motor.
 enum Cmd {
@@ -132,18 +152,18 @@ pub struct PlayerEngine {
 
 impl Default for PlayerEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Metrics::new()))
     }
 }
 
 impl PlayerEngine {
-    pub fn new() -> Self {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
         let (cmd_tx, cmd_rx) = channel();
         let (ev_tx, ev_rx) = channel();
         let tx = ev_tx.clone();
         let clock = Arc::new(Clock::default());
         let shared = clock.clone();
-        let spawned = std::thread::Builder::new().name("audio-engine".into()).spawn(move || run(cmd_rx, tx, shared));
+        let spawned = std::thread::Builder::new().name("audio-engine".into()).spawn(move || run(cmd_rx, tx, shared, metrics));
         let cmd = match spawned {
             Ok(_) => Some(cmd_tx),
             Err(e) => {
@@ -378,7 +398,7 @@ struct EngineState {
     last_hint: Instant,
 }
 
-fn run(rx: Receiver<Cmd>, tx: Sender<Event>, clock: Arc<Clock>) {
+fn run(rx: Receiver<Cmd>, tx: Sender<Event>, clock: Arc<Clock>, metrics: Arc<Metrics>) {
     let session = match output::start(tx.clone()) {
         Ok(o) => Some(o),
         Err(e) => {
@@ -407,7 +427,7 @@ fn run(rx: Receiver<Cmd>, tx: Sender<Event>, clock: Arc<Clock>) {
         // parado, pode dormir mais (comandos acordam na hora).
         let wait = if st.transport.decodes() { Duration::from_millis(10) } else { Duration::from_millis(120) };
         match rx.recv_timeout(wait) {
-            Ok(cmd) => handle_command(cmd, &mut st, &tx, &clock),
+            Ok(cmd) => handle_command(cmd, &mut st, &tx, &clock, &metrics),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -468,7 +488,7 @@ fn stop_track(st: &mut EngineState, clock: &Clock) {
     st.transport = Transport::Stopped;
 }
 
-fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Arc<Clock>) {
+fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Arc<Clock>, metrics: &Arc<Metrics>) {
     match cmd {
         Cmd::Play { path, start_at } => {
             // Troca de faixa: descarta a anterior e o buffer velho.
@@ -490,7 +510,7 @@ fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Ar
                 }
             }
             let rate = st.session.as_ref().map_or(48_000, |s| s.rate);
-            let opened = match catch_unwind(AssertUnwindSafe(|| open_track_media(&path, start_at, rate))) {
+            let opened = match catch_unwind(AssertUnwindSafe(|| open_track_media(&path, start_at, rate, metrics, clock))) {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => {
                     fail_play(st, clock, tx, e);
@@ -608,18 +628,19 @@ fn fail_play(st: &mut EngineState, clock: &Clock, tx: &Sender<Event>, e: EngineE
 
 /// Abre o arquivo pelo melhor backend: container de vídeo pelo hub do FilmCraft
 /// (vídeo + áudio de uma vez); arquivo de áudio pela fase 2 (symphonia/Opus).
-fn open_track_media(path: &str, start_at: f64, rate: u32) -> Result<OpenedTrack, EngineError> {
+fn open_track_media(path: &str, start_at: f64, rate: u32, metrics: &Arc<Metrics>, clock: &Arc<Clock>) -> Result<OpenedTrack, EngineError> {
     if video::is_video_container(path) {
         let source = video::open_media(path)?;
         let info = source.info();
         let duration = info.duration.seconds();
         let has_audio = info.has_audio();
+        metrics.set_track(TrackInfo::from_media(info));
         let video = match VideoInfo::from_media(info) {
             Some(v) => {
                 if v.width > video::MAX_DIMENSION || v.height > video::MAX_DIMENSION {
                     return Err(EngineError::TooLarge(format!("{}×{}", v.width, v.height)));
                 }
-                Some(video::spawn(&source, v, has_audio, start_at)?)
+                Some(video::spawn(&source, v, has_audio, start_at, metrics.clone(), clock.clone())?)
             }
             None => None,
         };
@@ -628,6 +649,18 @@ fn open_track_media(path: &str, start_at: f64, rate: u32) -> Result<OpenedTrack,
     } else {
         let source = decoder::open(path).map_err(EngineError::Open)?;
         let duration = source.duration();
+        let ext = Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("audio").to_ascii_lowercase();
+        metrics.set_track(TrackInfo {
+            container: ext.clone(),
+            video_codec: None,
+            audio_codec: Some(ext),
+            width: 0,
+            height: 0,
+            fps: 0.0,
+            duration: duration.unwrap_or(0.0),
+            bitrate: crate::metrics::estimate_bitrate(std::fs::metadata(path).ok().map(|m| m.len()), duration.unwrap_or(0.0)),
+            file_size: std::fs::metadata(path).ok().map(|m| m.len()),
+        });
         Ok(OpenedTrack { audio: Some(source), video: None, duration })
     }
 }

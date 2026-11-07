@@ -275,6 +275,25 @@ const HARD_DECODERS: usize = 8;
 /// nobody was looking at.
 pub const FRAME_BUDGET: usize = 1 << 30;
 
+/// // fork local-player-rs: per-cache ceiling configured by the host process (bytes; `0` = keep
+/// [`FRAME_CACHE_CEILING`]). A player wants a small window around the playhead, not the editor's
+/// 384 MB per clip; without this the ceiling is unreachable for a small-RAM machine.
+static CACHE_BUDGET: AtomicUsize = AtomicUsize::new(0);
+
+/// // fork local-player-rs: budget (bytes) for the caches created from now on. `0` restores the
+/// built-in [`FRAME_CACHE_CEILING`]; values above it are clamped.
+pub fn set_frame_cache_budget(bytes: usize) {
+    CACHE_BUDGET.store(bytes, Ordering::Relaxed);
+}
+
+/// // fork local-player-rs: the configured per-cache budget, `None` when unset.
+fn configured_budget() -> Option<usize> {
+    match CACHE_BUDGET.load(Ordering::Relaxed) {
+        0 => None,
+        n => Some(n.min(FRAME_CACHE_CEILING)),
+    }
+}
+
 /// What the caches of a process share: the cap on live decoders and the frame budget.
 struct Pool {
     caches: Mutex<Vec<Weak<Shared>>>,
@@ -446,6 +465,9 @@ pub struct GopCache {
     /// The container's clean aperture, cut from every frame before the rotation.
     crop: Option<Region>,
     budget: usize,
+    /// // fork local-player-rs: `budget` was set by the host and is a hard cap, not just a floor
+    /// raised by the small-frame reserve.
+    hard_cap: bool,
 }
 
 /// The cache reserves room for this many small frames: a frame-threaded decoder runs up to ~2x
@@ -537,7 +559,9 @@ impl GopCache {
             pool: pool.clone(),
         });
         pool.register(&shared);
-        Self { shared, explicit_color, rotation: 0, crop: None, budget: FRAME_CACHE_CEILING }
+        // // fork local-player-rs: a host-configured budget applies to every cache it creates.
+        let budget = configured_budget();
+        Self { shared, explicit_color, rotation: 0, crop: None, budget: budget.unwrap_or(FRAME_CACHE_CEILING), hard_cap: budget.is_some() }
     }
 
     /// Turn every decoded frame clockwise by `quarter_turns` × 90° (the container's display
@@ -574,8 +598,14 @@ impl GopCache {
 
     /// The small-frame reserve may use the configured cache budget, but may never enlarge it.
     fn cache_budget(&self, frame_bytes: usize) -> usize {
+        let ceiling = self.budget.min(FRAME_CACHE_CEILING);
+        // // fork local-player-rs: a budget set by the host is a hard cap (a player's window is
+        // small); the reserve still applies to the default limit.
+        if self.hard_cap {
+            return ceiling;
+        }
         let reserve = MIN_FRAMES.saturating_mul(frame_bytes).min(FRAME_CACHE_CEILING);
-        self.budget.min(FRAME_CACHE_CEILING).max(reserve)
+        ceiling.max(reserve)
     }
 
     /// Cache a frame [`Self::finish`] has been applied to.
@@ -1484,6 +1514,20 @@ mod tests {
         c.budget = 0;
         assert_eq!(c.cache_budget(4), MIN_FRAMES * 4, "small frames retain the playback reserve");
         assert_eq!(c.cache_budget(FRAME_CACHE_CEILING), FRAME_CACHE_CEILING, "large frames are capped instead of reserving 64 copies");
+    }
+
+    #[test]
+    fn a_host_budget_is_a_hard_cap() {
+        // // fork local-player-rs: the player sets a small window (e.g. 128 MB).
+        let mut c = GopCache::new(None);
+        c.budget = 16 << 20;
+        c.hard_cap = true;
+        assert_eq!(c.cache_budget(1), 16 << 20);
+        // Huge frames would reserve 64 copies without the cap.
+        assert_eq!(c.cache_budget(4 << 20), 16 << 20);
+        // The fork's own ceiling still wins over a larger host budget.
+        c.budget = usize::MAX;
+        assert_eq!(c.cache_budget(1), FRAME_CACHE_CEILING);
     }
 
     #[test]

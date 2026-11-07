@@ -57,7 +57,69 @@ Assets de cada release em
 | M | mute |
 | S | liga/desliga a legenda |
 | Z / X | atraso da legenda −0,5 s / +0,5 s (no overlay de status) |
+| D | overlay de estatísticas (decode/exibição/drops/upload/RSS/cache) |
 | Esc | sai da tela cheia |
+
+## Diagnóstico
+
+O app sai de fábrica com instrumentação sempre ligada (não depende de build de
+debug nem de o usuário perceber nada). Nada é enviado para lugar nenhum: fica
+tudo na sua pasta.
+
+**Log automático de sessão** — um arquivo por execução, mantendo os últimos 10
+(os mais velhos são apagados):
+
+- Windows: `%APPDATA%\local-player-rs\logs\`
+- Linux: `$XDG_DATA_HOME/local-player-rs/logs/` (ou `~/.local/share/local-player-rs/logs/`)
+
+Cada faixa tocada grava uma linha `track` (data/hora UTC, arquivo, container,
+codec de vídeo/áudio, resolução, fps, bitrate, duração). As anomalias viram
+linhas `event=…`:
+
+| Evento | Significa |
+| --- | --- |
+| `stall` | o frame ficou > 250 ms atrás do relógio (uma linha por episódio, com pior atraso, duração e drops) |
+| `drop_burst` | um tick descartou ≥ 4 frames (o apresentador pulou o atraso) |
+| `upload_ms` | subir a textura passou de 30 ms (disputa com a UI) |
+| `rss_mb` / `rss_back` | working set acima de 700 MB (e quando volta) |
+| `engine_dead` | a thread do motor de áudio morreu |
+
+**Overlay ao vivo (tecla D)**: fps de decode e de exibição, drops (e quantos por
+atraso), atraso vs relógio, custo do upload, intervalo de repaint, RSS/pico e
+bytes no cache de frames.
+
+**CSV por segundo** (opcional, o mais detalhado): `LOCALPLAYER_STATS=<arquivo.csv>`
+— ou `LOCALPLAYER_STATS=1` para gerar em `%TEMP%`. É o artefato mais útil para
+investigar uma travada.
+
+**Linha de comando** (não abre janela; no Windows o release se anexa ao console
+do PowerShell):
+
+```bash
+local-player-rs --probe filme.mkv                  # container, codecs, res, fps, bitrate, duração
+local-player-rs --bench filme.mkv --seconds 120    # decode puro: fps, ms/frame (média/p95/máx), por trecho de 10 s, cache, RSS
+local-player-rs --version | --help
+```
+
+`--bench` passa pelo mesmo caminho de abertura do player e roda sem áudio, GPU
+ou egui: separa "o decode não acompanha o tempo real" de "a UI engargala no
+upload/repaint". O teto do cache de frames decodificados é ajustável por
+`LOCALPLAYER_FRAME_CACHE_MB` (padrão 128; `0` volta ao teto do fork, 384 MB).
+
+> **PowerShell no Windows:** o `.exe` de release é subsistema GUI, então o
+> PowerShell não espera o processo terminar (a saída aparece depois do prompt e
+> `$LASTEXITCODE` fica vazio). Para uso em script, rode com
+> `cmd /c "local-player-rs --bench filme.mkv"` ou
+> `Start-Process -Wait -PassThru local-player-rs -ArgumentList '--bench','filme.mkv'`.
+> A saída vai para o console (o app se anexa ao console do processo pai).
+
+Anomalias são gravadas quando a UI volta a responder — se a janela congelou por
+2 s, a linha `event=stall` aparece com `dur_ms≈2000` logo depois; o log em si
+não consegue escrever durante um event loop travado.
+
+Para reportar uma travada, mande o `player-*.log` da execução, a saída de
+`--bench` no mesmo arquivo e, se possível, o CSV de `LOCALPLAYER_STATS` da
+mesma reprodução.
 
 ## Build
 

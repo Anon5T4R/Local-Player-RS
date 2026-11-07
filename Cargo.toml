@@ -31,7 +31,7 @@ winit = { path = "libs/winit/" }
 
 [package]
 name = "local-player-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 publish = false
@@ -100,6 +100,12 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # Diagnóstico (src/metrics.rs): RSS do processo. Prioridade da thread de
+    # decode abaixo da UI (src/engine/video.rs). Console para --probe/--bench
+    # no release GUI (src/cli.rs).
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_System_Console",
 ] }
 rfd = { version = "0.17", default-features = false }
 

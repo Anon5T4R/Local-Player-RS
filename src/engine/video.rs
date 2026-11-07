@@ -19,17 +19,19 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{fmt, path::Path};
 
 use filmcraft_frame::{PixelData, VideoFrame};
 use filmcraft_media::{FrameRequest, SharedReader, SharedSource};
 use filmcraft_time::Tick;
 
+use crate::metrics::Metrics;
 use crate::video::Frame;
 
 use super::decoder::{AudioSource, Chunk};
 use super::error::EngineError;
+use super::Clock;
 
 /// Maior lado aceito no decode/render (igual ao limite do render).
 pub const MAX_DIMENSION: u32 = crate::video::MAX_DIMENSION;
@@ -40,6 +42,16 @@ const AUDIO_CHUNK_FRAMES: usize = 4_800;
 /// Quantos frames repetidos (posição andando) contam como "acabou" quando o
 /// container não declara duração: 5 s de vídeo.
 const UNKNOWN_DURATION_REPEAT_SECS: f64 = 5.0;
+/// Quanto de vídeo o decode pode decodificar **à frente** do relógio mestre.
+///
+/// Sem isso a thread decodifica o arquivo inteiro o mais rápido que o CPU
+/// permite (o canal de 4 não segura nada: a UI drena tudo a cada repaint) e
+/// empurra frames para o heap/cache sem relação com o playback — a fonte da
+/// pressão de memória e da disputa de CPU com a UI (H1/H2/H3). 250 ms é folga
+/// suficiente para o jitter do relógio de áudio e limita o heap.
+const DECODE_LEAD_SECS: f64 = 0.25;
+/// Passo de espera do pacing: curto o bastante para um seek/stop responder já.
+const PACE_POLL: Duration = Duration::from_millis(20);
 
 /// Metadados do vídeo de um container, do jeito que a UI precisa.
 #[derive(Clone, Copy, Debug)]
@@ -211,12 +223,22 @@ impl Drop for VideoPipeline {
 }
 
 /// Sobe a thread de decode de `source` e devolve o handle da UI.
-pub(super) fn spawn(source: &SharedSource, info: VideoInfo, has_audio: bool, start: f64) -> Result<VideoPipeline, EngineError> {
+///
+/// `metrics` recebe os contadores de decode; `clock` é o relógio mestre: a
+/// thread só decodifica até [`DECODE_LEAD_SECS`] à frente dele (pacing).
+pub(super) fn spawn(
+    source: &SharedSource,
+    info: VideoInfo,
+    has_audio: bool,
+    start: f64,
+    metrics: Arc<Metrics>,
+    clock: Arc<Clock>,
+) -> Result<VideoPipeline, EngineError> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
     let (frame_tx, frame_rx) = sync_channel(RING);
     let src = source.clone();
-    let name = source.info().name.clone();
-    let spawned = std::thread::Builder::new().name("video-decode".into()).spawn(move || worker(src, info, start, cmd_rx, frame_tx, name));
+    let io = Iface { rx: cmd_rx, tx: frame_tx, name: source.info().name.clone(), metrics, clock };
+    let spawned = std::thread::Builder::new().name("video-decode".into()).spawn(move || worker(src, info, start, io));
     match spawned {
         Ok(_) => Ok(VideoPipeline { info, has_audio, generation: 0, cmd: cmd_tx, rx: frame_rx }),
         Err(e) => Err(EngineError::Open(format!("video thread: {e}"))),
@@ -258,7 +280,61 @@ fn drain_commands(rx: &Receiver<VideoCmd>, state: &mut Playback, last: &mut Opti
     }
 }
 
-fn worker(source: SharedSource, info: VideoInfo, start: f64, rx: Receiver<VideoCmd>, tx: SyncSender<VideoMsg>, name: String) {
+/// Resultado do pacing de um frame.
+enum Pace {
+    /// Pode decodificar: o frame está dentro da janela do relógio.
+    Ready,
+    /// Um comando mexeu no estado (seek): reavaliar pos/geração no loop.
+    Restart,
+    /// A thread deve terminar (Stop ou UI fechou).
+    Stop,
+}
+
+/// Segura a thread até o frame de `pts` estar a menos de [`DECODE_LEAD_SECS`] do
+/// relógio mestre. Enquanto espera, os comandos (seek/stop) são atendidos.
+fn pace(clock: &Clock, pts: f64, rx: &Receiver<VideoCmd>, state: &mut Playback, last: &mut Option<Arc<VideoFrame>>) -> Pace {
+    loop {
+        let ahead = pts - clock.position();
+        if !ahead.is_finite() || ahead <= DECODE_LEAD_SECS {
+            return Pace::Ready;
+        }
+        let wait = Duration::from_secs_f64((ahead - DECODE_LEAD_SECS).clamp(0.005, PACE_POLL.as_secs_f64()));
+        match rx.recv_timeout(wait) {
+            Ok(cmd) => {
+                // Um Seek muda a posição: voltar ao loop para reavaliar. Stop sai.
+                return if apply(cmd, state, last) { Pace::Stop } else { Pace::Restart };
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Pace::Stop,
+        }
+    }
+}
+
+/// Windows: decode abaixo da UI na prioridade da thread (sem isso o decode,
+/// que satura os cores, esfomeia o event loop da janela).
+#[cfg(windows)]
+fn lower_thread_priority() {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+    // SAFETY: pseudo-handle da thread atual, sempre válido no contexto chamado.
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+}
+
+#[cfg(not(windows))]
+fn lower_thread_priority() {}
+
+/// Canal da UI + instrumentação e relógio: o que o worker precisa além do
+/// source e da faixa.
+struct Iface {
+    rx: Receiver<VideoCmd>,
+    tx: SyncSender<VideoMsg>,
+    name: String,
+    metrics: Arc<Metrics>,
+    clock: Arc<Clock>,
+}
+
+fn worker(source: SharedSource, info: VideoInfo, start: f64, io: Iface) {
+    let Iface { rx, tx, name, metrics, clock } = io;
+    lower_thread_priority();
     let step = if info.fps.is_finite() && info.fps > 0.0 { 1.0 / info.fps } else { 1.0 / 30.0 };
     let repeat_limit = (UNKNOWN_DURATION_REPEAT_SECS / step).ceil().max(1.0) as usize;
     let mut state = Playback { generation: 0, pos: start.max(0.0), live: true };
@@ -288,7 +364,19 @@ fn worker(source: SharedSource, info: VideoInfo, start: f64, rx: Receiver<VideoC
             }
         }
 
+        // Pacing: nunca decodificar muito à frente do relógio mestre (memória e
+        // CPU ficam proporcionais ao playback, não ao throughput do decoder).
+        match pace(&clock, state.pos, &rx, &mut state, &mut last) {
+            Pace::Ready => {}
+            Pace::Restart => {
+                repeats = 0;
+                continue;
+            }
+            Pace::Stop => return,
+        }
+
         let tick = Tick::from_seconds_f64(state.pos);
+        let started = Instant::now();
         let decoded = catch_unwind(AssertUnwindSafe(|| source.video_frame(FrameRequest::full(tick))));
         let frame = match decoded {
             Ok(Ok(f)) => f,
@@ -302,20 +390,23 @@ fn worker(source: SharedSource, info: VideoInfo, start: f64, rx: Receiver<VideoC
                 return;
             }
         };
-
         let same = last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &frame));
         if same {
             repeats += 1;
+            metrics.note_decoded(started.elapsed());
         } else {
             repeats = 0;
+            // Latência percebida do frame: pedido ao hub + planos prontos para a GPU.
             match frame_planes(&frame, state.pos) {
                 Ok(planes) => {
+                    metrics.note_decoded(started.elapsed());
                     last = Some(frame);
                     if tx.send(VideoMsg::Frame { frame: planes, generation: state.generation }).is_err() {
                         return; // UI fechou
                     }
                 }
                 Err(e) => {
+                    metrics.note_decoded(started.elapsed());
                     let _ = tx.send(VideoMsg::Error { generation: state.generation, detail: format!("{name}: {e}") });
                     return;
                 }
@@ -379,23 +470,35 @@ mod tests {
         assert_eq!(shift_to_8(&[65_535], 16), vec![255]);
     }
 
-    /// Gera um Y4M minúsculo (4:2:0, 3 frames) e exercita o caminho real
-    /// abrir → pedir frames → planos YUV8 → 3 frames em sequência.
-    #[test]
-    fn abre_e_decodifica_um_y4m_pequeno() {
-        let (w, h) = (32u32, 24u32);
+    /// Gera um Y4M minúsculo (4:2:0) com `frames` quadros e grava no temp.
+    fn y4m_no_temp(w: u32, h: u32, frames: usize, tag: &str) -> String {
         let planos = (w * h + 2 * ((w.div_ceil(2)) * (h.div_ceil(2)))) as usize;
         let mut file = format!("YUV4MPEG2 W{w} H{h} F25:1 Ip A1:1 C420\n").into_bytes();
-        for i in 0..3usize {
+        for i in 0..frames {
             file.extend_from_slice(b"FRAME\n");
             let mut frame = vec![(i * 16) as u8; planos];
             frame[0] = 255;
             file.extend_from_slice(&frame);
         }
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("lp-rs-video-{}-{nanos}.y4m", std::process::id()));
+        let path = std::env::temp_dir().join(format!("lp-rs-video-{tag}-{}-{nanos}.y4m", std::process::id()));
         assert!(std::fs::write(&path, &file).is_ok(), "gravar Y4M de teste");
-        let name = path.to_string_lossy().to_string();
+        path.to_string_lossy().to_string()
+    }
+
+    /// Relógio mestre de teste com a posição já no fim: nada de pacing.
+    fn free_clock() -> Arc<Clock> {
+        let clock = Arc::new(Clock::default());
+        clock.publish(1_000_000.0);
+        clock
+    }
+
+    /// Gera um Y4M minúsculo (4:2:0, 3 frames) e exercita o caminho real
+    /// abrir → pedir frames → planos YUV8 → 3 frames em sequência.
+    #[test]
+    fn abre_e_decodifica_um_y4m_pequeno() {
+        let (w, h) = (32u32, 24u32);
+        let name = y4m_no_temp(w, h, 3, "small");
 
         let source = open_media(&name).expect("abrir Y4M");
         let info = source.info();
@@ -403,7 +506,7 @@ mod tests {
         assert_eq!((vinfo.width, vinfo.height), (w, h));
         assert!((vinfo.fps - 25.0).abs() < 1e-9, "{vinfo:?}");
 
-        let pipeline = spawn(&source, vinfo, false, 0.0).expect("spawn");
+        let pipeline = spawn(&source, vinfo, false, 0.0, Arc::new(Metrics::new()), free_clock()).expect("spawn");
         let mut frames = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while frames < 3 && std::time::Instant::now() < deadline {
@@ -420,8 +523,44 @@ mod tests {
                 Err(e) => panic!("sem frame do worker: {e}"),
             }
         }
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&name);
         assert_eq!(frames, 3, "três frames do Y4M");
+    }
+
+    /// Pacing: com o relógio parado o decode não pode decodificar o arquivo
+    /// inteiro (é isso que enchia a memória e esfomeava a UI). Avançar o
+    /// relógio libera os frames.
+    #[test]
+    fn pacing_segura_o_decode_no_relogio() {
+        let name = y4m_no_temp(32, 24, 60, "pace");
+        let source = open_media(&name).expect("abrir Y4M");
+        let vinfo = VideoInfo::from_media(source.info()).expect("vídeo");
+        let clock = Arc::new(Clock::default());
+        clock.publish(0.0);
+        let pipeline = spawn(&source, vinfo, false, 0.0, Arc::new(Metrics::new()), clock.clone()).expect("spawn");
+
+        // ~350 ms de lead a 25 fps = ~9 frames; com o relógio parado, muitos
+        // menos que os 60 do arquivo chegam.
+        let mut early = 0;
+        while pipeline.rx.recv_timeout(Duration::from_millis(300)).is_ok() {
+            early += 1;
+        }
+        assert!(early > 0, "o primeiro frame precisa chegar");
+        assert!(early < 40, "decode não pode correr o arquivo com o relógio parado (chegou {early})");
+
+        // Avançar o relógio libera o resto.
+        clock.publish(10.0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut total = early;
+        while total < 60 && std::time::Instant::now() < deadline {
+            match pipeline.rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(VideoMsg::Frame { .. }) => total += 1,
+                Ok(VideoMsg::End { .. }) | Ok(VideoMsg::Error { .. }) => break,
+                Err(_) => break,
+            }
+        }
+        let _ = std::fs::remove_file(&name);
+        assert!(total > early, "o relógio avançando precisa liberar frames (antes {early}, depois {total})");
     }
 
     /// Container inválido vira erro, não panic.
