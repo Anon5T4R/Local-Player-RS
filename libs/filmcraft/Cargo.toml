@@ -50,34 +50,34 @@ repository = "https://github.com/storytold/filmcraft"
 
 [workspace.dependencies]
 # internal
-filmcraft-time = { path = "crates/time" }
-filmcraft-color = { path = "crates/color" }
-filmcraft-bitstream = { path = "crates/bitstream" }
-filmcraft-isobmff = { path = "crates/isobmff" }
-filmcraft-avi = { path = "crates/avi" }
-filmcraft-matroska = { path = "crates/matroska" }
-filmcraft-mxf = { path = "crates/mxf" }
-filmcraft-mpegts = { path = "crates/mpegts" }
-filmcraft-mpeg2v = { path = "crates/mpeg2v" }
-filmcraft-ac3 = { path = "crates/ac3" }
-filmcraft-mpa = { path = "crates/mpa" }
-filmcraft-ogg = { path = "crates/ogg" }
-filmcraft-h264 = { path = "crates/h264" }
-filmcraft-hevc = { path = "crates/hevc" }
-filmcraft-vp8 = { path = "crates/vp8" }
-filmcraft-vp9 = { path = "crates/vp9" }
-filmcraft-prores = { path = "crates/prores" }
-filmcraft-dnx = { path = "crates/dnx" }
-filmcraft-apv = { path = "crates/apv" }
-filmcraft-dng = { path = "crates/dng" }
-filmcraft-av1 = { path = "crates/av1" }
-filmcraft-aac = { path = "crates/aac" }
-filmcraft-flac = { path = "crates/flac" }
-filmcraft-opus = { path = "crates/opus" }
-filmcraft-frame = { path = "crates/frame" }
-filmcraft-media = { path = "crates/media" }
-filmcraft-codecs = { path = "crates/codecs" }
-filmcraft-testkit = { path = "crates/testkit" }
+filmcraft-time = { version = "0.13.0", path = "crates/time" }
+filmcraft-color = { version = "0.13.0", path = "crates/color" }
+filmcraft-bitstream = { version = "0.13.0", path = "crates/bitstream" }
+filmcraft-isobmff = { version = "0.13.0", path = "crates/isobmff" }
+filmcraft-avi = { version = "0.13.0", path = "crates/avi" }
+filmcraft-matroska = { version = "0.13.0", path = "crates/matroska" }
+filmcraft-mxf = { version = "0.13.0", path = "crates/mxf" }
+filmcraft-mpegts = { version = "0.13.0", path = "crates/mpegts" }
+filmcraft-mpeg2v = { version = "0.13.0", path = "crates/mpeg2v" }
+filmcraft-ac3 = { version = "0.13.0", path = "crates/ac3" }
+filmcraft-mpa = { version = "0.13.0", path = "crates/mpa" }
+filmcraft-ogg = { version = "0.13.0", path = "crates/ogg" }
+filmcraft-h264 = { version = "0.13.0", path = "crates/h264" }
+filmcraft-hevc = { version = "0.13.0", path = "crates/hevc" }
+filmcraft-vp8 = { version = "0.13.0", path = "crates/vp8" }
+filmcraft-vp9 = { version = "0.13.0", path = "crates/vp9" }
+filmcraft-prores = { version = "0.13.0", path = "crates/prores" }
+filmcraft-dnx = { version = "0.13.0", path = "crates/dnx" }
+filmcraft-apv = { version = "0.13.0", path = "crates/apv" }
+filmcraft-dng = { version = "0.13.0", path = "crates/dng" }
+filmcraft-av1 = { version = "0.13.0", path = "crates/av1" }
+filmcraft-aac = { version = "0.13.0", path = "crates/aac" }
+filmcraft-flac = { version = "0.13.0", path = "crates/flac" }
+filmcraft-opus = { version = "0.13.0", path = "crates/opus" }
+filmcraft-frame = { version = "0.13.0", path = "crates/frame" }
+filmcraft-media = { version = "0.13.0", path = "crates/media" }
+filmcraft-codecs = { version = "0.13.0", path = "crates/codecs" }
+filmcraft-testkit = { version = "0.13.0", path = "crates/testkit" }
 
 # foundation
 thiserror = "2"
