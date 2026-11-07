@@ -16,17 +16,27 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       mestre e seek GOP-aware. RGBA (Motion JPEG) fica fora do render.
 - [x] **4. Legenda SRT + polimento** — SRT/VTT externo automático, toggle (S),
       atraso (Z/X, no overlay de status), atalhos, rotação e fullscreen.
-- [ ] **5. Release de teste** — `cargo xtask version 0.1.0` + tag; João testa.
-- [ ] **6. Fase 2 (pós-aprovação)** — hwdec Media Foundation, ASS, VTT completo,
-      zero-copy; decisão de aposentar o Local-Player antigo.
+- [x] **5. Release de teste** — v0.1.0 testada; v0.1.1 (fixes de pipeline) **aprovada
+      pelo João 2026-11-07**: MKV 1080p H.264 liso, sem travadas. Bench: decode a
+      328 fps (11x de folga).
+- [x] **5b. Legendas completas + UI (v0.1.2)** — VTT completo (settings/NOTE/tags),
+      ASS básico (styles, cores, \an, contorno/caixa; sem \pos/\fad/karaokê — ver
+      limitações em src/subtitle/ass.rs), mouse esconde junto com os controles,
+      overlay tabular com pos/dura, letterbox borda-a-borda (tolerância 1%).
+- [ ] **7. hwdec primeira opção** — Windows (Media Foundation + DXVA) → Linux
+      (VA-API/NVDEC) → macOS (VideoToolbox), fallback SW pure-Rust transparente.
+      Caminho: desacoplar `filmcraft-platform` do snapshot das deps do editor.
+- [ ] **8. Maturação** — legenda embutida no MKV (requer exposição de faixa no hub),
+      tonemap HDR, VFR, extração do motor como crate, contribuição dos patches
+      upstream (`docs/upstream/`).
 
 ## Pendências conhecidas
 
 - **hwdec** Media Foundation — 4K HEVC em software pode não segurar sozinho.
 - **HDR → SDR tonemap** — vídeo HDR sai sem conversão (cores lavadas).
 - **VFR** — o pipeline assume a taxa nominal declarada pelo container.
-- **ASS** (estilizado) fora do escopo; VTT cobre só o subconjunto simples
-  (timestamps com ponto, sem estilos/regiões).
+- **ASS** — básico (styles/cores/\an/contorno); `\pos`/`\move`/`\fad`/karaokê/`\t`/desenho
+  ignorados (avisos no stderr); sem colisão de linhas nem quebra automática.
 - **Hot-swap de device de áudio** — trocar a saída exige reabrir faixa/app.
 - **Gapless** — auto-avanço da playlist funciona, mas sem gapless fora de MP3.
 

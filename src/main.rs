@@ -5,7 +5,7 @@
 //! verdade (`engine.rs`, relógio mestre = áudio), **vídeo SW** (demux/decode
 //! pelo hub do FilmCraft em thread própria, frame escolhido por PTS e pintado
 //! numa textura wgpu com shader YUV→RGB, `video/`) e **legenda externa**
-//! SRT/VTT (`subtitle.rs`) desenhada pela egui sobre o vídeo.
+//! SRT/WebVTT/ASS (`subtitle/`) desenhada pela egui sobre o vídeo.
 //!
 //! "Nada pesado na UI thread": listagem de pasta e os decoders (áudio e vídeo)
 //! rodam em threads próprias e falam com a UI por canais; a UI só sobe o frame
@@ -742,41 +742,8 @@ impl PlayerApp {
     /// Overlay técnico da tecla D (inglês monoespaçado de propósito: é
     /// diagnóstico, não UI de produto — logo não passa pelo i18n).
     fn stats_overlay(&self, ui: &egui::Ui, rect: egui::Rect) {
-        use std::fmt::Write as _;
         let s = self.metrics.snapshot();
-        let mut text = String::new();
-        if let Some(t) = &s.track {
-            let _ = writeln!(
-                text,
-                "{} {}x{} {:.3} fps  {}  {}",
-                t.video_codec.as_deref().unwrap_or("-"),
-                t.width,
-                t.height,
-                t.fps,
-                t.container,
-                fmt_time(t.duration)
-            );
-            let audio = t.audio_codec.as_deref().unwrap_or("no audio");
-            let bitrate = t.bitrate.map_or(0.0, |b| b as f64 / 1e6);
-            let size = t.file_size.map_or(0.0, |b| b as f64 / (1024.0 * 1024.0));
-            let _ = writeln!(text, "audio {}  {bitrate:.2} Mb/s  file {size:.0} MB", audio);
-        }
-        let _ = writeln!(
-            text,
-            "decode  {:6.1} fps  avg {:5.2} ms  p95 {:5.2} ms  max {:6.2} ms",
-            s.decode_fps, s.decode_avg_ms, s.decode_p95_ms, s.decode_max_ms
-        );
-        let _ = writeln!(
-            text,
-            "present {:6.1} fps  shown {}  drop {} (late {})  late {:+.0} ms  ring {}",
-            s.display_fps, s.presented, s.dropped, s.dropped_late, s.late_ms, s.ring_depth
-        );
-        let _ = writeln!(
-            text,
-            "upload  {:5.2} ms  avg {:5.2}  max {:6.2}  repaint {:5.1} ms ({:.1} Hz)",
-            s.upload_ms, s.upload_avg_ms, s.upload_max_ms, s.repaint_ms, s.repaint_fps
-        );
-        let _ = writeln!(text, "rss {:6.0} MB  peak {:6.0} MB  cache {:6.1} MB", s.rss_mb, s.rss_peak_mb, s.cache_mb);
+        let text = stats_text(&s, self.position, self.duration);
         let galley = ui.painter().layout_no_wrap(text, egui::FontId::monospace(12.0), egui::Color32::from_gray(235));
         let pad = egui::vec2(10.0, 8.0);
         let bg = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), galley.size() + pad * 2.0);
@@ -785,8 +752,9 @@ impl PlayerApp {
         painter.galley(bg.min + pad, galley, egui::Color32::from_gray(235));
     }
 
-    /// Legenda por cima do vídeo: dentro do letterbox, na base, com caixa
-    /// semitransparente e a fonte da egui (o contorno é o fundo escuro).
+    /// Legenda por cima do vídeo: dentro do letterbox, com o estilo que o
+    /// arquivo declara (SRT/VTT usam o padrão — caixa semitransparente; ASS usa
+    /// contorno, cor, tamanho e alinhamento do script).
     fn show_subtitle(&self, ui: &egui::Ui, rect: egui::Rect) {
         let (Some(subs), Some(pipeline)) = (self.subtitles.as_ref(), self.video.as_ref()) else { return };
         if !self.subtitles_on {
@@ -794,24 +762,70 @@ impl PlayerApp {
         }
         // O atraso desloca o relógio de consulta: + = a fala entra depois.
         let time = self.engine.position_now() - self.subtitle_delay;
-        let Some(text) = subs.text_at(time) else { return };
+        let Some(cue) = subs.cue_at(time) else { return };
         let aspect = video::geometry::display_aspect(pipeline.info.width, pipeline.info.height, pipeline.info.par, self.rotation);
         let viewport = video::geometry::Rect::new(rect.min.x, rect.min.y, rect.width(), rect.height());
         let inner = video::geometry::letterbox(viewport, aspect, 1.0);
         if inner.w < 2.0 || inner.h < 2.0 {
             return;
         }
-        let font_size = (inner.h * 0.05).clamp(14.0, 44.0);
-        let pad_x = (font_size * 0.45).max(6.0);
-        let pad_y = (font_size * 0.18).max(3.0);
-        let margin = (inner.h * 0.035).clamp(8.0, 56.0);
-        let wrap = (inner.w * 0.92 - pad_x * 2.0).max(1.0);
+        // Tamanho em fração da altura da imagem (no SRT/VTT o padrão é 5%,
+        // no ASS vem do `PlayRes` do script).
+        let font_px = (inner.h * cue.style.size).clamp(9.0, (inner.h * 0.45).max(9.0));
+        let margins = subtitle::Margins {
+            left: cue.style.margin_l * inner.w,
+            right: cue.style.margin_r * inner.w,
+            top: cue.style.margin_v * inner.h,
+            bottom: cue.style.margin_v * inner.h,
+        };
+        let font_id = egui::FontId::new(
+            font_px,
+            match cue.style.family {
+                subtitle::Family::Monospace => egui::FontFamily::Monospace,
+                subtitle::Family::Proportional => egui::FontFamily::Proportional,
+            },
+        );
+        let wrap = (inner.w - margins.left - margins.right).max(1.0);
+        let base = rgb(cue.style.color);
+        // Uma passada por cor: o contorno do ASS precisa da MESMA galley pintada
+        // no `OutlineColour`, e a cor por seção venceria o fallback do painter.
+        let build = |override_color: Option<egui::Color32>| {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = wrap;
+            for segment in &cue.segments {
+                let color = override_color.unwrap_or_else(|| segment.color.map_or(base, rgb));
+                job.append(
+                    &segment.text,
+                    0.0,
+                    egui::TextFormat { font_id: font_id.clone(), color, italics: segment.italic || cue.style.italic, ..Default::default() },
+                );
+            }
+            job
+        };
         let painter = ui.painter();
-        let galley = painter.layout(text.to_owned(), egui::FontId::proportional(font_size), egui::Color32::WHITE, wrap);
-        let placed = subtitle::place_bottom(inner, (galley.size().x + pad_x * 2.0, galley.size().y + pad_y * 2.0), margin);
-        let bg = egui::Rect::from_min_size(egui::pos2(placed.x, placed.y), egui::vec2(placed.w, placed.h));
-        painter.rect_filled(bg, egui::CornerRadius::same(4), egui::Color32::from_black_alpha(130));
-        painter.galley(bg.min + egui::vec2(pad_x, pad_y), galley, egui::Color32::WHITE);
+        let galley = painter.layout_job(build(None));
+        let pad = if cue.style.backdrop == subtitle::Backdrop::Box { (font_px * 0.22).max(2.0) } else { 0.0 };
+        let placed = subtitle::place(inner, (galley.size().x + pad * 2.0, galley.size().y + pad * 2.0), &cue.anchor, margins);
+        let origin = egui::pos2(placed.x + pad, placed.y + pad);
+        match cue.style.backdrop {
+            subtitle::Backdrop::Box => {
+                let bg = egui::Rect::from_min_size(egui::pos2(placed.x, placed.y), egui::vec2(placed.w, placed.h));
+                painter.rect_filled(bg, egui::CornerRadius::same(4), egui::Color32::from_black_alpha(130));
+            }
+            subtitle::Backdrop::Outline => {
+                let outline = painter.layout_job(build(Some(rgb(cue.style.outline))));
+                let thickness = (font_px * 0.055).max(1.0);
+                for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                    painter.galley(origin + egui::vec2(dx * thickness, dy * thickness), outline.clone(), rgb(cue.style.outline));
+                }
+            }
+        }
+        painter.galley(origin, galley.clone(), base);
+        // "Negrito" do ASS: a egui não tem fonte pesada registrada, então a
+        // segunda passada de meio pixel engrossa o traço.
+        if cue.style.bold || cue.segments.iter().any(|s| s.bold) {
+            painter.galley(origin + egui::vec2(0.6, 0.0), galley, base);
+        }
     }
 
     /// Barra de controles do player (painel na janela, overlay no fullscreen).
@@ -819,6 +833,9 @@ impl PlayerApp {
         let lang = self.cfg.lang;
         let t = |k: Key| i18n::t(lang, k);
         let can_play = self.idx.is_some();
+        // Capricho: transporte agrupado, tempo em campo fixo (o relógio não
+        // "pula" a cada segundo com fonte monoespaçada de largura variável).
+        ui.spacing_mut().item_spacing.x = 6.0;
         ui.horizontal(|ui| {
             if ui.add_enabled(can_play, egui::Button::new("⏮")).on_hover_text(t(Key::Previous)).clicked() {
                 self.play_prev();
@@ -833,12 +850,14 @@ impl PlayerApp {
             if ui.add_enabled(can_play, egui::Button::new("⏭")).on_hover_text(t(Key::Next)).clicked() {
                 self.play_next();
             }
-            ui.label(egui::RichText::new(format!("{} / {}", fmt_time(self.position), fmt_time(self.duration))).monospace());
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new(format!("{:>8} / {:>8}", fmt_time(self.position), fmt_time(self.duration))).monospace());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let (icon, hover) = if self.muted { ("🔇", t(Key::Unmute)) } else { ("🔊", t(Key::Mute)) };
                 if ui.selectable_label(self.muted, icon).on_hover_text(hover).clicked() {
                     self.toggle_mute();
                 }
+                ui.spacing_mut().slider_width = 96.0;
                 let volume = ui.add(egui::Slider::new(&mut self.volume, 0.0..=100.0).show_value(false)).on_hover_text(t(Key::Volume));
                 if volume.changed() {
                     self.engine.set_volume((self.volume / 100.0) as f32);
@@ -865,6 +884,7 @@ impl PlayerApp {
                 }
             });
         });
+        ui.add_space(2.0);
         // Seek: durante o arrasto a UI manda; fora dele a posição vem do
         // relógio mestre (PositionHint).
         let dur = self.duration.max(0.0);
@@ -1027,6 +1047,11 @@ impl eframe::App for PlayerApp {
         // Em fullscreen a janela é só vídeo (os controles viram um overlay
         // flutuante embaixo); sem interação recente, até os painéis somem.
         let hide_chrome = self.video.is_some() && self.transport.is_playing() && self.last_activity.elapsed() >= Duration::from_millis(2500);
+        // Controles escondidos = cursor escondido junto (a seta parada sobre a
+        // imagem entrega que a UI está lá). Qualquer movimento/tecla repõe os dois.
+        if hide_chrome {
+            ctx.set_cursor_icon(egui::CursorIcon::None);
+        }
 
         if !self.fullscreen && !hide_chrome {
             egui::containers::Panel::top("topo").show(ui, |ui| {
@@ -1208,6 +1233,97 @@ fn fmt_time(secs: f64) -> String {
     }
 }
 
+/// Cor RGB do parse de legenda para o `Color32` do egui.
+fn rgb(c: [u8; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Texto do overlay da tecla D: uma linha por grupo, colunas de largura fixa.
+///
+/// Unidade por linha (todo campo de tempo em ms; fps e Hz separados) e
+/// `pos`/`dura` com o relógio mestre contra a duração da faixa — diagnóstico
+/// sem virar planilha embaralhada.
+fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64) -> String {
+    let mut rows: Vec<(&str, Vec<String>)> = Vec::new();
+    if let Some(t) = &s.track {
+        rows.push((
+            "track",
+            vec![
+                t.video_codec.clone().unwrap_or_else(|| "-".into()),
+                format!("{}x{}", t.width, t.height),
+                format!("{:.3} fps", t.fps),
+                t.container.clone(),
+            ],
+        ));
+        rows.push((
+            "audio",
+            vec![
+                t.audio_codec.clone().unwrap_or_else(|| "no audio".into()),
+                format!("{:.2} Mb/s", t.bitrate.map_or(0.0, |b| b as f64 / 1e6)),
+                format!("file {:.0} MB", t.file_size.map_or(0.0, |b| b as f64 / (1024.0 * 1024.0))),
+            ],
+        ));
+    }
+    // Sem duração do motor, a do container serve; posição pode passar do fim
+    // por um frame (o relógio mestre corre antes do `TrackEnded`).
+    let total = if duration > 0.0 { duration } else { s.track.as_ref().map_or(0.0, |t| t.duration) };
+    let percent = if total > 0.0 { (position / total * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+    rows.push(("pos", vec![format!("{} / {}", fmt_time(position), fmt_time(total)), format!("{percent:.1}%")]));
+    rows.push(("decode", vec![format!("{:5.1} fps", s.decode_fps)]));
+    rows.push((
+        "latency",
+        vec![format!("avg {:6.2} ms", s.decode_avg_ms), format!("p95 {:6.2} ms", s.decode_p95_ms), format!("max {:6.2} ms", s.decode_max_ms)],
+    ));
+    rows.push((
+        "present",
+        vec![
+            format!("{:5.1} fps", s.display_fps),
+            format!("shown {}", s.presented),
+            format!("drop {} (late {})", s.dropped, s.dropped_late),
+            format!("ring {}", s.ring_depth),
+        ],
+    ));
+    rows.push(("late", vec![format!("{:+.0} ms", s.late_ms)]));
+    rows.push((
+        "upload",
+        vec![format!("{:5.2} ms", s.upload_ms), format!("avg {:5.2} ms", s.upload_avg_ms), format!("max {:5.2} ms", s.upload_max_ms)],
+    ));
+    rows.push(("repaint", vec![format!("{:5.1} ms", s.repaint_ms), format!("{:.1} Hz", s.repaint_fps)]));
+    rows.push(("memory", vec![format!("rss {:.0} MB", s.rss_mb), format!("peak {:.0} MB", s.rss_peak_mb), format!("cache {:.1} MB", s.cache_mb)]));
+    stats_table(&rows)
+}
+
+/// Tabela monoespaçada: rótulo numa coluna, células alinhadas pela maior de
+/// cada coluna. Sem espaços sobrando no fim das linhas.
+fn stats_table(rows: &[(&str, Vec<String>)]) -> String {
+    use std::fmt::Write as _;
+    let label_w = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0) + 2;
+    let columns = rows.iter().map(|(_, cells)| cells.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; columns];
+    for (_, cells) in rows {
+        for (i, cell) in cells.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+    let mut out = String::new();
+    for (label, cells) in rows {
+        let _ = write!(out, "{label:<label_w$}");
+        for (i, cell) in cells.iter().enumerate() {
+            let _ = write!(out, "{cell}");
+            if i + 1 < cells.len() {
+                for _ in 0..widths[i].saturating_sub(cell.chars().count()) {
+                    out.push(' ');
+                }
+                out.push_str("  ");
+            }
+        }
+        out.push('\n');
+    }
+    let used = out.trim_end().len();
+    out.truncate(used);
+    out
+}
+
 fn pick_media() -> Option<String> {
     #[cfg(windows)]
     {
@@ -1239,4 +1355,44 @@ fn list_media(dir: &str) -> Result<Vec<String>, String> {
         .collect();
     files.sort_by_key(|f| f.to_lowercase());
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Colunas de largura fixa: o início de cada célula casa entre as linhas e
+    /// nenhuma linha termina com espaço.
+    #[test]
+    fn tabela_de_stats_alinha_colunas() {
+        let rows = [
+            ("a", vec!["1".to_owned(), "xx".to_owned()]),
+            ("bbb", vec!["22".to_owned(), "y".to_owned()]),
+            ("cc", vec!["333".to_owned(), "zzz".to_owned()]),
+        ];
+        let text = stats_table(&rows);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[0].find("xx"), lines[1].find("y"), "{text}");
+        assert_eq!(lines[0].find("xx"), lines[2].find("zzz"), "{text}");
+        assert!(lines[0].starts_with("a    "), "{text:?}");
+        for line in &lines {
+            assert!(!line.ends_with(' '), "{line:?}");
+        }
+    }
+
+    /// A linha `pos/dura` existe mesmo sem faixa aberta e usa o relógio do
+    /// player quando a duração do motor é conhecida.
+    #[test]
+    fn overlay_mostra_pos_e_duracao() {
+        let snapshot = metrics::Snapshot::default();
+        let text = stats_text(&snapshot, 65.0, 130.0);
+        assert!(text.contains("pos"), "{text}");
+        assert!(text.contains("1:05 / 2:10"), "{text}");
+        assert!(text.contains("50.0%"), "{text}");
+        // Sem duração não inventa percentual.
+        let text = stats_text(&snapshot, 5.0, 0.0);
+        assert!(text.contains("0:05 / 0:00"), "{text}");
+        assert!(text.contains("0.0%"), "{text}");
+    }
 }

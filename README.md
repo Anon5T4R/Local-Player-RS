@@ -34,10 +34,14 @@ Assets de cada release em
 - **Áudio em arquivo:** MP3, FLAC, Opus, Vorbis, WAV/AIFF e M4A (AAC/ALAC).
 - **Áudio dentro de container de vídeo:** AAC, MP3, Opus, AC-3/E-AC-3, FLAC,
   Vorbis e PCM — a trilha toca junto com a imagem e é o relógio mestre.
-- **Legendas externas:** `.srt` (e `.vtt` no subconjunto simples) **carregado
-  sozinho** ao lado do vídeo — `filme.srt`, `filme.sub.srt`, `filme.pt-br.srt`,
-  `filme.en.srt`, ... O parser tolera BOM UTF-8/UTF-16, CRLF, tags
-  `<i>/<b>/<u>` e entradas quebradas (puladas, o arquivo continua).
+- **Legendas externas:** `.srt`, `.vtt`, `.ass`/`.ssa` **carregadas sozinhas** ao
+  lado do vídeo nesta ordem — `filme.srt`, `filme.vtt`, `filme.ass`,
+  `filme.sub.srt`, `filme.pt-br.srt`, `filme.en.srt`, ... O parser tolera BOM
+  UTF-8/UTF-16, CRLF, tags `<i>/<b>/<u>` e entradas quebradas (puladas, o
+  arquivo continua). WebVTT: `align:`/`position:`/`line:` em %, blocos `NOTE`
+  ignorados, `<c.classe>` removido. ASS/SSA: estilo do script (fonte, tamanho,
+  cores, negrito/itálico, os nove alinhamentos, margens) e overrides comuns
+  (`\an`, `\i`, `\b`, `\fs`, `\c`, `\N`); `\pos`/karaokê/desenho ficam fora.
 - **Playlist** persistente entre sessões: `+ arquivo` / `+ pasta` (multi-arquivo,
   a listagem roda fora da UI thread — pasta de rede não trava a janela) ou
   arraste os arquivos pra janela; "abrir com" no Explorer também funciona

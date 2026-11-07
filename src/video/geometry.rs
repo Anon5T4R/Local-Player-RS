@@ -30,11 +30,22 @@ pub fn display_aspect(width: u32, height: u32, par: (u32, u32), rotation: u8) ->
     (w * par) / h
 }
 
+/// Tolerância de aspecto para tratar vídeo e janela como "casados": dentro de
+/// 1% de diferença, pinta borda-a-borda em vez de sobrar uma moldura de poucos
+/// pixels (que a olho nu parece defeito de layout). O esticamento máximo é 1%.
+pub const ASPECT_TOLERANCE: f32 = 0.01;
+
 /// Encaixa uma imagem de `src_w × src_h` (pixels de exibição) dentro de `dst`,
-/// preservando o aspecto e centralizando. Entradas inválidas devolvem `dst`.
+/// preservando o aspecto e centralizando. Aspecto praticamente igual ao do
+/// destino ([`ASPECT_TOLERANCE`]) devolve `dst` inteiro: barras pretas só
+/// quando o aspecto difere de verdade. Entradas inválidas devolvem `dst`.
 pub fn letterbox(dst: Rect, src_w: f32, src_h: f32) -> Rect {
     let finite = src_w.is_finite() && src_h.is_finite() && dst.w.is_finite() && dst.h.is_finite();
     if !finite || src_w <= 0.0 || src_h <= 0.0 || dst.w <= 0.0 || dst.h <= 0.0 {
+        return dst;
+    }
+    let quality = (dst.w / dst.h) / (src_w / src_h);
+    if (quality - 1.0).abs() <= ASPECT_TOLERANCE {
         return dst;
     }
     let scale = (dst.w / src_w).min(dst.h / src_h);
@@ -99,6 +110,27 @@ mod tests {
         assert!(close(r.w, 56.25), "{r:?}");
         assert!(close(r.x, 10.0 + (200.0 - 56.25) / 2.0), "{r:?}");
         assert!(close(r.y, 20.0), "{r:?}");
+    }
+
+    /// Aspecto praticamente igual ao da janela (dentro de 1%): borda-a-borda,
+    /// sem a moldura de poucos pixels que sobrava do arredondamento.
+    #[test]
+    fn aspecto_quase_igual_pinta_borda_a_borda() {
+        // 1920×1080 numa janela 1920×1072: 0,7% de diferença, antes sobrava
+        // ~14 px de moldura lateral.
+        let dst = Rect::new(0.0, 0.0, 1920.0, 1072.0);
+        assert_eq!(letterbox(dst, 1920.0, 1080.0), dst);
+        // 4:3 numa janela 1,34:1 (0,7%) também casa.
+        let dst = Rect::new(5.0, 5.0, 800.0, 600.0);
+        assert_eq!(letterbox(dst, 1600.0, 1200.0), dst);
+        // Fora da tolerância (4:3 em 16:9) continua letterbox de verdade.
+        let r = letterbox(Rect::new(0.0, 0.0, 1600.0, 900.0), 640.0, 480.0);
+        assert!(close(r.h, 900.0) && close(r.w, 1200.0) && close(r.x, 200.0), "{r:?}");
+        // Exatamente no limite (1%) ainda casa; um fio acima, não.
+        let dst = Rect::new(0.0, 0.0, 1010.0, 1000.0);
+        assert_eq!(letterbox(dst, 1000.0, 1000.0), dst);
+        let dst = Rect::new(0.0, 0.0, 1011.0, 1000.0);
+        assert!(letterbox(dst, 1000.0, 1000.0).w < dst.w);
     }
 
     /// Rotação ímpar troca o aspecto: 16:9 girado 90° vira 9:16 (pillarbox).
