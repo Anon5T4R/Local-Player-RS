@@ -1,0 +1,157 @@
+	Language	Idioma
+	Theme	Tema
+	Error	Error
+	Search…	Buscar…
+	Copy	Copiar
+	Memory	Memoria
+	Cores	Núcleos
+	Uptime	Tiempo encendido
+	Disks	Discos
+	Processes	Procesos
+	Filter	Filtrar
+	Name	Nombre
+	End task	Finalizar
+	End process?	¿Finalizar proceso?
+	Unsaved work in that app is lost.	El trabajo no guardado de esa app se pierde.
+	Confirm	Confirmar
+	Cancel	Cancelar
+	Clear	Borrar
+	Show/Hide	Mostrar/Ocultar
+	Quit	Salir
+	Pin	Fijar
+	Unpin	Desfijar
+	Delete	Eliminar
+	empty — copy something	vacío — copia algo
+	Vault	Bóveda
+	Master password	Contraseña maestra
+	Unlock	Desbloquear
+	New vault	Nueva bóveda
+	wrong password or corrupted/tampered file	contraseña incorrecta o archivo corrupto/adulterado
+	Add	Añadir
+	Save	Guardar
+	Items	Elementos
+	Username	Usuario
+	Password	Contraseña
+	Lock	Bloquear
+	Quick unlock on this PC	Desbloqueo rápido en este PC
+	Forget key	Olvidar clave
+	Edit	Editar
+	Install	Instalar
+	Update	Actualizar
+	Open	Abrir
+	Start menu	Menú Inicio
+	Desktop	Escritorio
+	installed	instalado
+	available	disponible
+	downloading	descargando
+	Refresh	Actualizar lista
+	up to date	al día
+	not installed	no instalado
+	Uninstall	Desinstalar
+	Cleanup	Limpieza
+	Open folder	Abrir carpeta
+	Uninstall and remove shortcuts?	¿Desinstalar y quitar accesos?
+	running	ejecutando
+	restart Lab Hub	reinicie Lab Hub
+	The item goes to trash — recoverable in the official LocalKeys.	El elemento va a la papelera — recuperable en LocalKeys oficial.
+	Import	Importar
+	Bitwarden (encrypted export)	Bitwarden (exportación cifrada)
+	File	Archivo
+	File password	Contraseña del archivo
+	items imported	elementos importados
+	card/identity skipped — the lab only manages login/note	de tarjeta/identidad omitidos — el lab solo gestiona login/nota
+	Import	Importación
+	Generator	Generador
+	Generate	Generar
+	Use	Usar
+	Passphrase	Frase de contraseña
+	Words	Palabras
+	Separator	Separador
+	Capitalize	Capitalizar
+	Include number	Incluir número
+	Length	Longitud
+	Lowercase	Minúsculas
+	Uppercase	Mayúsculas
+	Digits	Dígitos
+	Symbols	Símbolos
+	terrible	pésima
+	weak	débil
+	fair	aceptable
+	strong	fuerte
+	excellent	excelente
+	Change master password	Cambiar contraseña maestra
+	Current password	Contraseña actual
+	New password	Nueva contraseña
+	Confirm new password	Confirmar nueva contraseña
+	master password changed	contraseña maestra cambiada
+	Attachments	Adjuntos
+	Add attachment	Añadir adjunto
+	Save	Guardar
+	no attachments	sin adjuntos
+	Settings	Ajustes
+	Global hotkey	Atajo global
+	Set…	Definir…
+	Start with system	Iniciar con el sistema
+	press the keys…	pulsa las teclas…
+	Closing minimizes to tray.	Cerrar minimiza a la bandeja.
+	working…	trabajando…
+	unlocking…	desbloqueando…
+	importing…	importando…
+	reading file…	leyendo archivo…
+	changing the master password…	cambiando la contraseña maestra…
+	attachment too large (max 10 MiB — the whole vault is rewritten on every save)	adjunto demasiado grande (máx 10 MiB — la bóveda entera se regraba en cada guardado)
+	URL	URL
+	Notes	Notas
+	Favorite	Favorito
+	Show/hide	Mostrar/ocultar
+	Export	Exportar
+	JSON (vault in the clear)	JSON (bóveda en claro)
+	CSV (spreadsheet)	CSV (hoja de cálculo)
+	WARNING: the export is UNENCRYPTED — any app can read it. Use it only to migrate, then delete the file.	ATENCIÓN: la exportación sale SIN CIFRAR — cualquier app puede leerla. Úsala solo para migrar y borra el archivo después.
+	exported	exportado
+	Trash	Papelera
+	trash is empty	papelera vacía
+	Restore	Restaurar
+	restored	restaurado
+	Delete forever	Eliminar para siempre
+	deleted forever	eliminado para siempre
+	Close	Cerrar
+	Check for updates	Buscar actualizaciones
+	Folders	Carpetas
+	Folder	Carpeta
+	New folder	Nueva carpeta
+	Rename folder	Renombrar carpeta
+	Delete folder	Eliminar carpeta
+	No folder	Sin carpeta
+	Folder name	Nombre de la carpeta
+	Attachments	Adjuntos
+	Delete attachment	Eliminar adjunto
+	All	Todas
+	Drag media here or pick from the playlist	Arrastra el medio aquí o elige de la lista
+	Add file	Agregar archivo
+	Add folder	Agregar carpeta
+	Rotate	Rotar
+	Mute (M)	Silenciar (M)
+	Unmute (M)	Activar sonido (M)
+	Play	Reproducir
+	Pause	Pausar
+	Stop	Detener
+	Next	Siguiente
+	Previous	Anterior
+	Volume	Volumen
+	Audio only	Solo audio
+	No audio output device	No hay dispositivo de salida de audio
+	Could not open this file	No se pudo abrir este archivo
+	Decoding failed	Error al decodificar
+	This file cannot be seeked	Este archivo no permite buscar
+	This video is too large to play (over 8K)	Este vídeo es demasiado grande para reproducir (más de 8K)
+	The audio engine stopped	El motor de audio se detuvo
+	Fullscreen (F)	Pantalla completa (F)
+	Exit fullscreen (F)	Salir de pantalla completa (F)
+	CPU	CPU
+	TOTP	TOTP
+	s	s
+	KeePass (.kdbx)	KeePass (.kdbx)
+	CSV (Chrome/Edge/LastPass/1Password)	CSV (Chrome/Edge/LastPass/1Password)
+	Subtitles (S)	Subtítulos (S)
+	Subtitle delay	Retardo de subtítulos

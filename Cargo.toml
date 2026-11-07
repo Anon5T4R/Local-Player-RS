@@ -1,0 +1,113 @@
+﻿[workspace]
+resolver = "3"
+members = ["xtask", "lab-ui"]
+default-members = [".", "lab-ui"]
+# EXCLUI libs/ do workspace — junto com o [patch.crates-io] é o que faz os
+# crates vendored daqui valerem (sem o exclude o cargo tenta resolver eles
+# como members e os patches silenciam).
+exclude = ["libs"]
+
+# Forks vendored (egui 6d518fc, winit a517b38) — receita no AGENTS.md do local-office.
+[patch.crates-io]
+# craft-libs vendored: o workspace do FilmCraft (libs/filmcraft) aponta pra
+# estes paths também; o patch cobre qualquer resolução vinda da registry.
+craft-docpath = { path = "libs/craft-libs/crates/docpath" }
+craft-media = { path = "libs/craft-libs/crates/media" }
+ecolor = { path = "libs/egui/crates/ecolor/" }
+emath = { path = "libs/egui/crates/emath/" }
+epaint = { path = "libs/egui/crates/epaint/" }
+epaint_default_fonts = { path = "libs/egui/crates/epaint_default_fonts/" }
+egui = { path = "libs/egui/crates/egui/" }
+egui-winit = { path = "libs/egui/crates/egui-winit/" }
+egui-wgpu = { path = "libs/egui/crates/egui-wgpu/" }
+egui_glow = { path = "libs/egui/crates/egui_glow/" }
+egui_extras = { path = "libs/egui/crates/egui_extras/" }
+egui_kittest = { path = "libs/egui/crates/egui_kittest/" }
+egui_system_font_provider = { path = "libs/egui/crates/egui_system_font_provider/" }
+eframe = { path = "libs/egui/crates/eframe/" }
+egui_demo_lib = { path = "libs/egui/crates/egui_demo_lib/" }
+egui_inspection = { path = "libs/egui/crates/egui_inspection/" }
+winit = { path = "libs/winit/" }
+
+[package]
+name = "local-player-rs"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+repository = "https://github.com/Anon5T4R/Local-Player-RS"
+description = "Player de mídia 100% local e offline em Rust puro — candidato a sucessor do Local-Player"
+
+[build-dependencies]
+# Embute o ícone no .exe (Windows) — sem isso o Explorer mostra ícone genérico.
+winresource = "0.1"
+
+[dependencies]
+eframe = "0.37"
+egui = "0.37"
+lab-ui = { path = "lab-ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Ícone da janela (mesmo desenho do Local-Keys: include_bytes + decode)
+image = "0.25"
+# Atualização: craft_update (libs/craft-libs) — check no GitHub, prompt egui e
+# self-update (Windows: MSI/portable; Linux: AppImage/tar.gz). O `egui` liga o
+# prompt e o Updater de UI.
+craft-update = { path = "libs/craft-libs/crates/update", features = ["egui"] }
+# Motor de decode (fase 2): containers + codecs clean-room do FilmCraft
+# (vendored em libs/filmcraft) e o bootstrap de áudio do symphonia.
+filmcraft-codecs = { path = "libs/filmcraft/crates/codecs" }
+# Trait MediaSource/AudioBuffer do mesmo snapshot vendored: o Opus em Ogg usa o
+# OggSource do FilmCraft (o symphonia 0.5 não tem decodificador Opus) e a fase 3
+# lê vídeo e áudio de containers pelo mesmo `SharedSource`.
+filmcraft-media = { path = "libs/filmcraft/crates/media" }
+# Tipos de frame/cor/tempo do mesmo snapshot: o pipeline de vídeo (fase 3)
+# recebe `Arc<VideoFrame>`, lê os planos YUV e as cores do container — só os
+# tipos, nenhum código novo dos crates vendored é tocado.
+filmcraft-frame = { path = "libs/filmcraft/crates/frame" }
+filmcraft-color = { path = "libs/filmcraft/crates/color" }
+filmcraft-time = { path = "libs/filmcraft/crates/time" }
+# Saída de áudio da fase 2: cpal 0.16 (stream f32 no device default; o ring e o
+# callback são nossos). Alinhado com o que a suíte já validou em build Windows.
+cpal = "0.16"
+# Erros tipados do motor (regra do repo: nada de unwrap/panic em código novo).
+thiserror = "2"
+symphonia = { version = "0.5.5", default-features = false, features = [
+    "aac",
+    "mp1",
+    "mp2",
+    "mp3",
+    "flac",
+    "alac",
+    "pcm",
+    "wav",
+    "aiff",
+    "ogg",
+    "vorbis",
+    "isomp4",
+] }
+
+[dev-dependencies]
+# Valida o WGSL do vídeo na CPU: um erro no shader derrubaria o app no
+# arranque, não na hora de pintar. `naga` já está no lock (dependência do wgpu).
+naga = { version = "30", features = ["wgsl-in"] }
+
+[target.'cfg(windows)'.dependencies]
+# ShellExecuteW (ação "Download" do prompt do updater) + diálogo nativo de
+# arquivo/pasta (rfd; no Linux o caminho é digitado — política do lab:
+# AppImage enxuto).
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+rfd = { version = "0.17", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+# unwind (não abort): o motor embrulha decode/seek em catch_unwind para que
+# um arquivo corrompido vire Event::Error na UI em vez de matar o app — com
+# panic=abort esse catch não pega nada.
+panic = "unwind"

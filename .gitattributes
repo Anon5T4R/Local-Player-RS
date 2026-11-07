@@ -1,0 +1,13 @@
+# Every checkout is byte-identical to the repository: no line-ending conversion, ever.
+# O CI de Windows e os instaladores dependem de bytes estáveis; sem conversão de
+# linha não há churn de CRLF/LF entre checkouts.
+* -text
+
+# Not text at all: no textual diffs or merges either.
+*.ico binary
+*.png binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.p12 binary

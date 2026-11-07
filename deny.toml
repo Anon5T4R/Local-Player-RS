@@ -1,0 +1,85 @@
+# cargo-deny policy — mesma política do local-pdf: só licença permissiva é linkada.
+# Copyleft de TERCEIROS nunca vira dependência; o GPL-3.0-or-later abaixo é a
+# licença dos NOSSOS crates (local-keys, lab-ui), não uma autorização para deps GPL.
+
+[graph]
+all-features = true
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    # Nossos crates (local-keys, lab-ui).
+    "GPL-3.0-or-later",
+    # option-ext (via keyring/secret-service): file-level copyleft, efetivo como permissiva.
+    "MPL-2.0",
+    # secstr (via keepass): domínio público.
+    "Unlicense",
+    # libfuzzer-sys (dev-graph de rav1e/image): licença de NCSA, estilo BSD.
+    "NCSA",
+    # libbz2-rs-sys (via zip?/imagem no graph): licen�a historicamente usada pelo bzip2, estilo BSD.`n    "bzip2-1.0.6",`n    # libbz2-rs-sys: licença historicamente usada pelo bzip2, estilo BSD.
+    "bzip2-1.0.6",
+    # webpki-roots (via ureq/autoupdate): bundle de CAs — dados, CDLA-Permissive-2.0.
+    "CDLA-Permissive-2.0",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# Nenhuma dependência git: tudo vem do crates.io (pinado pelo lock).
+# O CI recusa qualquer fonte git+ no Cargo.lock.
+allow-git = []
+
+[advisories]
+yanked = "warn"
+ignore = [
+    # paste e proc-macro-error são unmaintained (sem vulnerabilidade). Chegam como
+    # proc macros do derive de serde/egui em tempo de COMPILAÇÃO, não no binário.
+    { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; proc macro em tempo de compilação" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; proc macro em tempo de compilação" },
+    # quick-xml (dev/graph do keepass + svg do image): DoS ao parsear XML hostil.
+    # O único XML que deciframos em runtime é o KDBX importado pelo PRÓPRIO usuário.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml DoS quadrático; XML de entrada é do próprio usuário" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml alocação de namespace; XML de entrada é do próprio usuário" },
+    # ttf-parser unmaintained (sem vulnerabilidade): fontes são as embutidas do egui.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; só fontes embutidas do egui" },
+    # Stack D-Bus do accesskit no Linux (atspi -> zbus), unmaintained sem successor.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; stack a11y Linux via accesskit_unix" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; stack a11y Linux via accesskit_unix" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; stack a11y Linux via accesskit_unix" },
+    # zip 2.6.1 (sem release fixada): as três abaixo são do ZipArchive::extract() com
+    # alvo hostil. O autoupdate usa by_index + escrita manual e baixa zip SÓ do
+    # nosso release no GitHub via HTTPS (ureq + webpki-roots). Revisitar quando sair zip fixado.
+    { id = "RUSTSEC-2026-0367", reason = "SUID em extract(); não usamos extract() — by_index + escrita manual" },
+    { id = "RUSTSEC-2026-0368", reason = "symlink em extract(); não usamos extract() — by_index + escrita manual" },
+    { id = "RUSTSEC-2026-0369", reason = "symlink/permissões em extract(); não usamos extract() — by_index + escrita manual" },
+    # Decompressores (zstd/legacy) do zip: o zip processado é o do nosso release
+    # oficial (canal HTTPS autenticado), não entrada hostil. Revisitar com zip fixado.
+    { id = "RUSTSEC-2026-0391", reason = "leak entre streams de zip; entrada é o release oficial no GitHub" },
+    { id = "RUSTSEC-2026-0398", reason = "Vec além da capacidade em decompress; entrada é o release oficial no GitHub" },
+    { id = "RUSTSEC-2026-0403", reason = "memória não inicializada em frame legacy; entrada é o release oficial no GitHub" },
+]
+
+# Fontes padrão do egui (Ubuntu-Light, Hack, emoji-icon-font): licenças de fonte
+# na allowlist via exceção, como no local-pdf.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]

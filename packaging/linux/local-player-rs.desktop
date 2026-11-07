@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Local Player RS
+GenericName=Media Player
+Keywords=player;media;video;music;audio;local;
+Exec=local-player-rs
+Icon=local-player-rs
+Categories=AudioVideo;Video;Audio;
+Comment=Player de mídia 100% local e offline em Rust puro
+Terminal=false
+StartupWMClass=local-player-rs

@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: WiX Toolset (v5 + extensões UI/Util, como packaging/windows/package.ps1 espera)
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
+      - name: Build e pacote (MSI per-machine + portable zip)
+        run: powershell -ExecutionPolicy Bypass -File packaging/windows/package.ps1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: dist/release/*
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev
+      - name: Build release
+        run: cargo build --release --bin local-player-rs
+      - name: Package
+        run: |
+          set -euo pipefail
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          version=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*= "\([^"]*\)".*/\1/')
+          mkdir -p out
+          appdir="AppDir-local-player-rs"
+          mkdir -p "$appdir/usr/bin"
+          cp "target/release/local-player-rs" "$appdir/usr/bin/"
+          cp "icons/icon.png" "$appdir/local-player-rs.png"
+          printf '[Desktop Entry]\nType=Application\nName=Local Player RS\nExec=local-player-rs\nIcon=local-player-rs\nCategories=AudioVideo;Video;Audio;\nComment=Player de mídia 100%% local e offline em Rust puro\nTerminal=false\nStartupWMClass=local-player-rs\n' > "$appdir/local-player-rs.desktop"
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          ./linuxdeploy-x86_64.AppImage --appdir "$appdir" \
+            --desktop-file "$appdir/local-player-rs.desktop" \
+            --icon-file "$appdir/local-player-rs.png" --output appimage
+          ls -la *.AppImage 2>/dev/null || true
+          # Nomes no padrão da suíte, que o updater (craft_update) parseia:
+          # <app>-<version>-<os>-<arch>.<ext>
+          if ls ./*.AppImage 1>/dev/null 2>&1; then
+            mv ./*.AppImage "out/local-player-rs-$version-linux-x86_64.AppImage"
+          fi
+          tar -czf "out/local-player-rs-$version-linux-x86_64.tar.gz" -C "target/release" local-player-rs
+          ls -la out
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: out/
+          if-no-files-found: error
+
+  arch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Valida PKGBUILD
+        run: |
+          version=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*= "\([^"]*\)".*/\1/')
+          cat > PKGBUILD <<EOF
+          pkgname=local-player-rs
+          pkgver=$version
+          pkgrel=1
+          pkgdesc='Player de mídia 100% local e offline em Rust puro'
+          arch=(x86_64)
+          url='https://github.com/Anon5T4R/Local-Player-RS'
+          license=(GPL-3.0-or-later)
+          depends=(glibc gcc-libs alsa-lib libxcb libxrandr libxi libxcursor libxkbcommon)
+          makedepends=(rust cargo)
+          source=("local-player-rs-$pkgver.tar.gz::https://github.com/Anon5T4R/Local-Player-RS/archive/refs/tags/v$pkgver.tar.gz")
+          sha256sums=(SKIP)
+          build() {
+            cd "local-player-rs-$pkgver"
+            cargo build --release --bin local-player-rs
+          }
+          package() {
+            cd "local-player-rs-$pkgver"
+            install -Dm755 "target/release/local-player-rs" "$pkgdir/usr/bin/local-player-rs"
+            install -Dm644 "icons/icon.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/local-player-rs.png"
+            install -Dm644 "packaging/linux/local-player-rs.desktop" "$pkgdir/usr/share/applications/local-player-rs.desktop"
+          }
+          EOF
+          namcap PKGBUILD || true
+          echo "PKGBUILD gerado e validado"
+
+  publish:
+    needs: [windows, linux, arch]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+      - name: Criar release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Local Player RS ${GITHUB_REF_NAME}" \
+            --notes "Player de mídia 100% local e offline em Rust puro." \
+            dist/windows/* dist/linux/* \
+          || gh release upload "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --clobber \
+            dist/windows/* dist/linux/*

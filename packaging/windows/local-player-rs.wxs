@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Local Player RS MSI (WiX Toolset v5: `dotnet tool install -g wix`, plus its UI and Util extensions:
+  `wix extension add -g WixToolset.UI.wixext/5.0.2` and the same for WixToolset.Util.wixext).
+  Built by package.ps1:
+
+    wix build local-player-rs.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
+      -d Version=0.1.0 -d BinDir=... -d IconPath=... -d LicenseRtf=... -o out.msi
+
+  Per-machine install into Program Files\Local Player RS with a Start Menu shortcut. The installer
+  shows the standard WiX dialogs: welcome + license, progress, and a finish page.
+
+  UpgradeCode and the component GUID below belong to Local Player RS alone — they are NEW GUIDs,
+  not the ones of the old Local-Player: Windows Installer treats every package sharing an
+  UpgradeCode as one product, so reusing them would make the two apps refuse to install together
+  ("a newer version is already installed") or silently uninstall each other. Never copy these into
+  (or from) a sibling app of the suite.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+      Name="Local Player RS"
+      Manufacturer="Local Player RS contributors"
+      Version="$(var.Version)"
+      UpgradeCode="73BFB89E-155A-4757-B17D-16FD9E2518ED"
+      Scope="perMachine"
+      Compressed="yes"
+      Language="1033">
+    <SummaryInformation Description="Local Player RS media player" Manufacturer="Local Player RS contributors" />
+    <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
+         (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of Local Player RS is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="LocalPlayerRsIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="LocalPlayerRsIcon.ico" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/Anon5T4R/Local-Player-RS" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/Anon5T4R/Local-Player-RS/releases" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/Anon5T4R/Local-Player-RS/issues" />
+
+    <!-- Installer UI: WixUI_Minimal is welcome + license, progress, then a finish page so people
+         can see the install worked. Its dialogs and bitmaps are WiX's own (WixToolset.UI.wixext);
+         package.ps1 builds the license RTF. The finish page offers to launch Local Player RS (ticked
+         by default) through WixShellExec (WixToolset.Util.wixext); silent installs (/qn) never
+         show it. -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Local Player RS" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#LocalPlayerRsExe]" />
+    <CustomAction Id="LaunchLocalPlayerRs" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec"
+        Impersonate="yes" Return="ignore" />
+    <UI>
+      <ui:WixUI Id="WixUI_Minimal" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchLocalPlayerRs"
+          Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Local Player RS" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="Local Player RS" Level="1">
+      <ComponentGroupRef Id="LocalPlayerRsFiles" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="LocalPlayerRsFiles" Directory="INSTALLFOLDER">
+      <Component Id="LocalPlayerRsApp" Guid="41C3F61C-D541-4BF1-9DE3-C318E51DACE5">
+        <File Id="LocalPlayerRsExe" Source="$(var.BinDir)\local-player-rs.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="Local Player RS"
+              Description="Local Player RS media player" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+              Icon="LocalPlayerRsIcon.ico" IconIndex="0" />
+          <!-- Alias de busca: a busca do Windows casa o nome do atalho, e todo app da
+               suíte começa com Local — "player" puro não acharia nada. -->
+          <Shortcut Id="AliasShortcut" Directory="ProgramMenuFolder" Name="Player"
+              Description="Local Player RS media player" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+              Icon="LocalPlayerRsIcon.ico" IconIndex="0" />
+          <!-- Atalho no desktop (per-machine = desktop comum, visível pra todos os usuários). -->
+          <Shortcut Id="DesktopShortcut" Directory="DesktopFolder" Name="Local Player RS"
+              Description="Local Player RS media player" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+              Icon="LocalPlayerRsIcon.ico" IconIndex="0" />
+        </File>
+
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\local-player-rs.exe" Value="[#LocalPlayerRsExe]" Type="string" />
+        <!-- Where this MSI installed the app. The app's own updater (craft_update) reads it
+             (HKLM for a per-machine install) under the suite's key to know this is an MSI
+             install, so it updates with the new MSI rather than the portable zip. The key's
+             last segment is the app's display name (craft_update::App::name). -->
+        <RegistryValue Root="HKLM" Key="Software\Anon5T4R\Local Player RS" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

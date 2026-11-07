@@ -1,0 +1,105 @@
+# Workspace vendored do FilmCraft (upstream storytold/filmcraft).
+#
+# Só os crates que o Local Player RS usa foram copiados: containers, codecs,
+# color/frame/time e o testkit (dev). O resto do upstream (projeto, engine,
+# ui-egui, gpu, export...) fica de fora — o objetivo aqui é o motor de
+# decode do player, não o editor.
+#
+# `craft-media`/`craft-docpath` apontam para o craft-libs já vendored no app
+# (libs/craft-libs): nenhuma fonte git, como manda a regra da suíte.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/aac",
+    "crates/ac3",
+    "crates/apv",
+    "crates/av1",
+    "crates/avi",
+    "crates/bitstream",
+    "crates/codecs",
+    "crates/color",
+    "crates/dng",
+    "crates/dnx",
+    "crates/flac",
+    "crates/frame",
+    "crates/h264",
+    "crates/hevc",
+    "crates/isobmff",
+    "crates/matroska",
+    "crates/media",
+    "crates/mpa",
+    "crates/mpeg2v",
+    "crates/mpegts",
+    "crates/mxf",
+    "crates/ogg",
+    "crates/opus",
+    "crates/prores",
+    "crates/testkit",
+    "crates/time",
+    "crates/vp8",
+    "crates/vp9",
+]
+
+[workspace.package]
+version = "0.13.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+repository = "https://github.com/storytold/filmcraft"
+
+[workspace.dependencies]
+# internal
+filmcraft-time = { path = "crates/time" }
+filmcraft-color = { path = "crates/color" }
+filmcraft-bitstream = { path = "crates/bitstream" }
+filmcraft-isobmff = { path = "crates/isobmff" }
+filmcraft-avi = { path = "crates/avi" }
+filmcraft-matroska = { path = "crates/matroska" }
+filmcraft-mxf = { path = "crates/mxf" }
+filmcraft-mpegts = { path = "crates/mpegts" }
+filmcraft-mpeg2v = { path = "crates/mpeg2v" }
+filmcraft-ac3 = { path = "crates/ac3" }
+filmcraft-mpa = { path = "crates/mpa" }
+filmcraft-ogg = { path = "crates/ogg" }
+filmcraft-h264 = { path = "crates/h264" }
+filmcraft-hevc = { path = "crates/hevc" }
+filmcraft-vp8 = { path = "crates/vp8" }
+filmcraft-vp9 = { path = "crates/vp9" }
+filmcraft-prores = { path = "crates/prores" }
+filmcraft-dnx = { path = "crates/dnx" }
+filmcraft-apv = { path = "crates/apv" }
+filmcraft-dng = { path = "crates/dng" }
+filmcraft-av1 = { path = "crates/av1" }
+filmcraft-aac = { path = "crates/aac" }
+filmcraft-flac = { path = "crates/flac" }
+filmcraft-opus = { path = "crates/opus" }
+filmcraft-frame = { path = "crates/frame" }
+filmcraft-media = { path = "crates/media" }
+filmcraft-codecs = { path = "crates/codecs" }
+filmcraft-testkit = { path = "crates/testkit" }
+
+# foundation
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+log = "0.4"
+# All date/time conversion goes through chrono (no hand-rolled calendar code
+# beyond the 400-year range extension; FILMCRAFT AGENTS.md).
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+rayon = "1"
+proptest = "1"
+roxmltree = "0.21"
+# Shared craft-libs, vendored no próprio app (nunca git).
+craft-docpath = { version = "0.1.0", path = "../craft-libs/crates/docpath" }
+craft-media = { version = "0.1.0", path = "../craft-libs/crates/media", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
