@@ -16,6 +16,7 @@ use eframe::egui_wgpu::{CallbackResources, CallbackTrait};
 
 use super::color::yuv_to_rgb;
 use super::geometry::{self, Rect};
+use super::tone::{self, ToneMapMode, ToneMapParams};
 use super::{chroma_dims, Frame};
 
 /// Texturas planas do frame atual (Y, U, V).
@@ -45,15 +46,26 @@ struct Inner {
     par: (u32, u32),
     /// Alvo `*Srgb`: o shader entrega luz linear e o hardware codifica de volta.
     linearize: bool,
+    /// Pico default do PQ (env `LOCALPLAYER_HDR_PEAK`, lido no arranque).
+    tone_peak: f32,
+    /// Pico sinalizado pelo container (`MaxCLL`/mastering display) do frame
+    /// atual; vence o env quando existe.
+    frame_peak: Option<f32>,
     /// Maior lado que o device aceita (≤ 8K).
     max_side: u32,
 }
 
 impl Inner {
+    /// Parâmetros de HDR do frame atual (SDR → `Off`, sem tonemap).
+    fn tone_params(&self) -> ToneMapParams {
+        ToneMapParams::for_color(&self.color, self.frame_peak.unwrap_or(self.tone_peak))
+    }
+
     fn write_uniform(&self) {
         let (uv, offset) = geometry::uv_transform(self.rotation);
         let matrix = yuv_to_rgb(&self.color);
-        self.queue.write_buffer(&self.uniform, 0, &matrix.uniform_bytes(uv, offset, self.linearize));
+        let tone = self.tone_params().uniform_row();
+        self.queue.write_buffer(&self.uniform, 0, &matrix.uniform_bytes(uv, offset, self.linearize, tone));
     }
 
     /// (Re)cria texturas, views e bind group quando o frame muda de tamanho/croma.
@@ -119,6 +131,20 @@ impl std::fmt::Display for UploadError {
         match self {
             Self::TooLarge(d) | Self::Invalid(d) => f.write_str(d),
         }
+    }
+}
+
+/// HDR → SDR ativo no frame atual (o overlay da tecla D mostra).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToneMapStatus {
+    pub mode: ToneMapMode,
+    pub peak_nits: f32,
+}
+
+impl ToneMapStatus {
+    /// Linha do overlay, no inglês técnico da tecla D.
+    pub fn label(self) -> String {
+        format!("{} -> sdr hable ({:.0} nits)", self.mode.label(), self.peak_nits)
     }
 }
 
@@ -218,7 +244,7 @@ impl VideoGpu {
         });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("video-yuv-uniform"),
-            size: 5 * 16,
+            size: 6 * 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -238,6 +264,8 @@ impl VideoGpu {
                 size: (0, 0),
                 par: (1, 1),
                 linearize: format.is_srgb(),
+                tone_peak: tone::env_peak_nits(),
+                frame_peak: None,
                 max_side,
             })),
             aspect: Arc::new(Mutex::new(1.0)),
@@ -249,7 +277,10 @@ impl VideoGpu {
     }
 
     /// Sobe o frame para as texturas e atualiza a matriz de cor/rotação.
-    pub fn upload(&self, frame: &Frame, par: (u32, u32), rotation: u8) -> Result<(), UploadError> {
+    ///
+    /// `hdr_peak_nits` é o pico sinalizado pelo container para este frame
+    /// (`MaxCLL`/mastering display); `None` deixa o env/default do PQ decidir.
+    pub fn upload(&self, frame: &Frame, par: (u32, u32), rotation: u8, hdr_peak_nits: Option<f32>) -> Result<(), UploadError> {
         let mut g = self.lock();
         let (w, h) = (frame.width, frame.height);
         if w == 0 || h == 0 {
@@ -283,6 +314,7 @@ impl VideoGpu {
         g.rotation = rotation % 4;
         g.size = (w, h);
         g.par = par;
+        g.frame_peak = hdr_peak_nits.filter(|p| p.is_finite() && *p > 0.0);
         g.write_uniform();
         drop(g);
         *self.aspect.lock().unwrap_or_else(PoisonError::into_inner) = geometry::display_aspect(w, h, par, rotation);
@@ -302,6 +334,13 @@ impl VideoGpu {
             geometry::display_aspect(g.size.0, g.size.1, g.par, rotation)
         };
         *self.aspect.lock().unwrap_or_else(PoisonError::into_inner) = aspect;
+    }
+
+    /// HDR → SDR ativo no frame atual, para o overlay da tecla D.
+    pub fn tone_map(&self) -> Option<ToneMapStatus> {
+        let g = self.lock();
+        let p = g.tone_params();
+        p.mode.is_active().then_some(ToneMapStatus { mode: p.mode, peak_nits: p.peak_nits })
     }
 
     /// Shape do egui que pinta o frame dentro de `rect` (letterbox no callback).

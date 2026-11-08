@@ -4,6 +4,7 @@
 //! - [`present`] — escolha do frame que deve estar na tela por PTS (drop/repeat),
 //!   matemática pura e testável;
 //! - [`color`] — YUV → R'G'B' (BT.601/709/2020 + faixa limitada/completa), pura;
+//! - [`tone`] — HDR → SDR (EOTF PQ/HLG + Hable) em CPU, espelho do shader;
 //! - [`geometry`] — letterbox e transformação de UV da rotação, pura;
 //! - [`gpu`] — texturas wgpu + shader WGSL e o paint callback do egui.
 //!
@@ -14,6 +15,7 @@ pub mod color;
 pub mod geometry;
 pub mod gpu;
 pub mod present;
+pub mod tone;
 
 use std::sync::Arc;
 

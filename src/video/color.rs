@@ -29,9 +29,10 @@ impl YuvMatrix {
         self.rows.map(|r| (r[0] * y + r[1] * cb + r[2] * cr + r[3]).clamp(0.0, 1.0))
     }
 
-    /// Bytes do uniform (20 floats, layout `vec4 × 5` do WGSL: 3 linhas + uv + uv_off).
-    pub fn uniform_bytes(&self, uv: [f32; 4], uv_offset: [f32; 2], linearize: bool) -> Vec<u8> {
-        let mut values = Vec::with_capacity(20);
+    /// Bytes do uniform (24 floats, layout `vec4 × 6` do WGSL: 3 linhas + uv +
+    /// uv_off + tone).
+    pub fn uniform_bytes(&self, uv: [f32; 4], uv_offset: [f32; 2], linearize: bool, tone: [f32; 4]) -> Vec<u8> {
+        let mut values = Vec::with_capacity(24);
         for row in self.rows {
             values.extend_from_slice(&row);
         }
@@ -40,6 +41,7 @@ impl YuvMatrix {
         values.push(uv_offset[1]);
         values.push(if linearize { 1.0 } else { 0.0 });
         values.push(0.0);
+        values.extend_from_slice(&tone);
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 }
@@ -115,12 +117,15 @@ mod tests {
         assert_rgb(yuv.apply(0.0, 128.0, 128.0), [0.0, 0.0, 0.0], 1e-4);
     }
 
-    /// O uniform tem exatamente os 20 floats do layout WGSL.
+    /// O uniform tem exatamente os 24 floats do layout WGSL.
     #[test]
-    fn uniform_tem_20_floats() {
-        let bytes = yuv_to_rgb(&ColorInfo::REC709).uniform_bytes([1.0, 0.0, 0.0, 1.0], [0.0, 0.0], true);
-        assert_eq!(bytes.len(), 20 * 4);
+    fn uniform_tem_24_floats() {
+        let bytes = yuv_to_rgb(&ColorInfo::REC709).uniform_bytes([1.0, 0.0, 0.0, 1.0], [0.0, 0.0], true, [1.0, 1000.0, 0.0, 0.0]);
+        assert_eq!(bytes.len(), 24 * 4);
         let flag = f32::from_le_bytes([bytes[72], bytes[73], bytes[74], bytes[75]]);
         assert_eq!(flag, 1.0, "flag de linearização no float 18");
+        let mode = f32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
+        let peak = f32::from_le_bytes([bytes[84], bytes[85], bytes[86], bytes[87]]);
+        assert_eq!((mode, peak), (1.0, 1000.0), "linha de tonemap nos floats 20/21");
     }
 }

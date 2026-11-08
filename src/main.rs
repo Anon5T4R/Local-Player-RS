@@ -885,6 +885,7 @@ impl PlayerApp {
         let generation = pipeline.generation;
         let has_audio = pipeline.has_audio;
         let par = pipeline.info.par;
+        let hdr_peak = pipeline.info.hdr_peak_nits;
         // hwdec da faixa: o log de sessão ganha uma linha quando o modo fica
         // conhecido (hardware, software, ou a queda para o software no meio).
         self.session.hwdec(&self.metrics.hw_usage());
@@ -929,7 +930,7 @@ impl PlayerApp {
             let frame_pts = frame.pts;
             if let Some(gpu) = &self.video_gpu {
                 let started = Instant::now();
-                match gpu.upload(&frame, par, self.rotation) {
+                match gpu.upload(&frame, par, self.rotation, hdr_peak) {
                     Ok(()) => {
                         let elapsed = started.elapsed();
                         self.metrics.note_upload(elapsed);
@@ -999,7 +1000,8 @@ impl PlayerApp {
     /// diagnóstico, não UI de produto — logo não passa pelo i18n).
     fn stats_overlay(&self, ui: &egui::Ui, rect: egui::Rect) {
         let s = self.metrics.snapshot();
-        let text = stats_text(&s, self.position, self.duration);
+        let hdr = self.video_gpu.as_ref().and_then(|g| g.tone_map()).map(|t| t.label());
+        let text = stats_text(&s, self.position, self.duration, hdr.as_deref());
         let galley = ui.painter().layout_no_wrap(text, egui::FontId::monospace(12.0), egui::Color32::from_gray(235));
         let pad = egui::vec2(10.0, 8.0);
         let bg = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), galley.size() + pad * 2.0);
@@ -1679,7 +1681,7 @@ fn window_video_px(width: u32, height: u32, par: (u32, u32), rotation: u8) -> (u
 /// Unidade por linha (todo campo de tempo em ms; fps e Hz separados) e
 /// `pos`/`dura` com o relógio mestre contra a duração da faixa — diagnóstico
 /// sem virar planilha embaralhada.
-fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64) -> String {
+fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64, hdr: Option<&str>) -> String {
     let mut rows: Vec<(&str, Vec<String>)> = Vec::new();
     if let Some(t) = &s.track {
         rows.push((
@@ -1699,6 +1701,10 @@ fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64) -> String {
                 format!("file {:.0} MB", t.file_size.map_or(0.0, |b| b as f64 / (1024.0 * 1024.0))),
             ],
         ));
+    }
+    // Só HDR: em SDR a linha não existe (overlay idêntico ao de antes).
+    if let Some(hdr) = hdr {
+        rows.push(("hdr", vec![hdr.to_owned()]));
     }
     rows.push(("hwdec", vec![s.hw.summary(), format!("{} frames", s.hw.frames)]));
     // Sem duração do motor, a do container serve; posição pode passar do fim
@@ -1823,12 +1829,12 @@ mod tests {
     #[test]
     fn overlay_mostra_pos_e_duracao() {
         let snapshot = metrics::Snapshot::default();
-        let text = stats_text(&snapshot, 65.0, 130.0);
+        let text = stats_text(&snapshot, 65.0, 130.0, None);
         assert!(text.contains("pos"), "{text}");
         assert!(text.contains("1:05 / 2:10"), "{text}");
         assert!(text.contains("50.0%"), "{text}");
         // Sem duração não inventa percentual.
-        let text = stats_text(&snapshot, 5.0, 0.0);
+        let text = stats_text(&snapshot, 5.0, 0.0, None);
         assert!(text.contains("0:05 / 0:00"), "{text}");
         assert!(text.contains("0.0%"), "{text}");
     }
@@ -1840,10 +1846,22 @@ mod tests {
             hw: metrics::HwUsage { mode: metrics::HwMode::Hardware, backend: Some("Media Foundation"), frames: 12, ..Default::default() },
             ..Default::default()
         };
-        let text = stats_text(&snapshot, 0.0, 0.0);
+        let text = stats_text(&snapshot, 0.0, 0.0, None);
         assert!(text.contains("hwdec"), "{text}");
         assert!(text.contains("Media Foundation · hardware"), "{text}");
         assert!(text.contains("12 frames"), "{text}");
+        assert!(!text.contains("hdr"), "SDR não ganha linha de HDR: {text}");
+    }
+
+    /// Com HDR ativo o overlay ganha a linha do operador (e some em SDR).
+    #[test]
+    fn overlay_mostra_tonemap_hdr() {
+        let snapshot = metrics::Snapshot::default();
+        let text = stats_text(&snapshot, 0.0, 0.0, Some("pq -> sdr hable (1000 nits)"));
+        assert!(text.contains("hdr"), "{text}");
+        assert!(text.contains("pq -> sdr hable (1000 nits)"), "{text}");
+        let sdr = stats_text(&snapshot, 0.0, 0.0, None);
+        assert!(!sdr.contains("hdr"), "{sdr}");
     }
 
     /// O botão "Retomar" só aparece fora das bordas: pelo menos 10 s de faixa

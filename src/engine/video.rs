@@ -63,12 +63,22 @@ pub struct VideoInfo {
     pub duration: f64,
     /// Pixel aspect ratio (n, d); (0,0) = quadrado.
     pub par: (u32, u32),
+    /// Pico de luminância sinalizado pelo container (`MaxCLL`/mastering
+    /// display), em nits. `None` = o tonemap usa o env/default.
+    pub hdr_peak_nits: Option<f32>,
 }
 
 impl VideoInfo {
     pub fn from_media(info: &filmcraft_media::MediaInfo) -> Option<Self> {
         let v = info.video.as_ref()?;
-        Some(Self { width: v.width, height: v.height, fps: v.frame_rate.sane().as_f64(), duration: info.duration.seconds(), par: v.par })
+        Some(Self {
+            width: v.width,
+            height: v.height,
+            fps: v.frame_rate.sane().as_f64(),
+            duration: info.duration.seconds(),
+            par: v.par,
+            hdr_peak_nits: v.hdr.as_ref().and_then(|h| h.peak_nits()),
+        })
     }
 }
 
@@ -448,10 +458,21 @@ fn frame_planes(frame: &VideoFrame, pts: f64) -> Result<Frame, String> {
     }
 }
 
-/// `u16` de `bits` bits → `u8` (mantém os 8 bits altos).
+/// `u16` de `bits` bits → `u8` (mantém os 8 bits altos, com arredondamento).
+///
+/// HDR em 10/12 bits ainda desce para 8 bits aqui (a textura do pipeline é
+/// `R8Unorm`): arredondar em vez de truncar tira ~meio LSB de viés e suaviza um
+/// pouco o banding das cenas escuras típicas de PQ. Subir o pipeline inteiro
+/// para `R16Unorm` fica para uma iteração própria (muda `Frame`, formato das
+/// texturas e o dobro de banda no upload).
 fn shift_to_8(plane: &[u16], bits: u32) -> Vec<u8> {
     let shift = bits.saturating_sub(8).min(8);
-    plane.iter().map(|v| (*v >> shift).min(u8::MAX as u16) as u8).collect()
+    if shift == 0 {
+        return plane.iter().map(|v| (*v).min(u8::MAX as u16) as u8).collect();
+    }
+    let half = 1u16 << (shift - 1);
+    let mask = (1u16 << shift) - 1;
+    plane.iter().map(|v| ((*v >> shift) + u16::from((*v & mask) >= half)).min(u8::MAX as u16) as u8).collect()
 }
 
 #[cfg(test)]
@@ -472,10 +493,14 @@ mod tests {
     fn yuv16_desce_para_8_bits() {
         // 10 bits: 0, 512 e 1023 → 0, 128, 255.
         assert_eq!(shift_to_8(&[0, 512, 1023], 10), vec![0, 128, 255]);
+        // 10 bits arredonda (514 → 128,5 → 129) em vez de truncar.
+        assert_eq!(shift_to_8(&[513, 514, 515], 10), vec![128, 129, 129]);
         // 8 bits passa direto.
         assert_eq!(shift_to_8(&[1, 200, 255], 8), vec![1, 200, 255]);
         // valores acima do esperado não estouram o u8.
         assert_eq!(shift_to_8(&[65_535], 16), vec![255]);
+        // arredondar no topo não passa de 255
+        assert_eq!(shift_to_8(&[65_534], 16), vec![255]);
     }
 
     /// Gera um Y4M minúsculo (4:2:0) com `frames` quadros e grava no temp.

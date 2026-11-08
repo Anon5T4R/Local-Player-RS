@@ -1,14 +1,19 @@
 // YUV planar (8 bits) → R'G'B' com a matriz do container e rotação em quartos.
+// Em faixas PQ/HLG faz HDR → SDR: EOTF, tonemap Hable e encode para o alvo.
 //
-// Layout do uniform (80 bytes, 5 × vec4<f32>):
+// Layout do uniform (96 bytes, 6 × vec4<f32>):
 //   row_r/g/b = (kY, kCb, kCr, offset) por canal, já com a normalização da faixa
 //               (16–235 limitada / 0–255 completa) dobrada nos coeficientes
 //   uv        = (a, b, c, d) da transformação UV: src = (a·u + c·v + ox, b·u + d·v + oy)
 //   uv_off    = (ox, oy, linearize, _)
+//   tone      = (mode, peak_nits, _, _) — mode: 0 = SDR, 1 = PQ, 2 = HLG
 //
 // linearize = 1 quando o alvo é *_Srgb: o shader entrega luz linear e o hardware
-// codifica para sRGB na escrita; com alvo Unorm (o caso do egui) os valores
-// gamma-encoded saem direto.
+// codifica para sRGB na escrita. Com alvo Unorm os valores gamma-encoded saem
+// direto (aí o encode sRGB é feito aqui, depois do tonemap).
+//
+// A matemática de HDR (EOTF PQ/HLG, Hable, pico) tem espelho CPU testável em
+// `tone.rs`; este shader é validado pelo teste `naga` do `gpu.rs`.
 
 struct Uniforms {
     row_r: vec4<f32>,
@@ -16,6 +21,7 @@ struct Uniforms {
     row_b: vec4<f32>,
     uv: vec4<f32>,
     uv_off: vec4<f32>,
+    tone: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -23,6 +29,22 @@ struct Uniforms {
 @group(0) @binding(2) var tex_u: texture_2d<f32>;
 @group(0) @binding(3) var tex_v: texture_2d<f32>;
 @group(0) @binding(4) var samp: sampler;
+
+// Branco de referência SDR (BT.2408) e pico absoluto do PQ, em nits.
+const REFERENCE_WHITE_NITS: f32 = 203.0;
+const PQ_PEAK_NITS: f32 = 10000.0;
+// HLG é relativo: pico fixo de 1000 nits (independe do env do PQ).
+const HLG_PEAK_NITS: f32 = 1000.0;
+// SMPTE ST 2084.
+const PQ_M1: f32 = 0.15930176;
+const PQ_M2: f32 = 78.84375;
+const PQ_C1: f32 = 0.8359375;
+const PQ_C2: f32 = 18.851563;
+const PQ_C3: f32 = 18.6875;
+// ARIB STD-B67.
+const HLG_A: f32 = 0.17883277;
+const HLG_B: f32 = 0.28466892;
+const HLG_C: f32 = 0.5599107;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -55,6 +77,58 @@ fn to_linear(v: f32) -> f32 {
     return select(pow((x + 0.055) / 1.055, 2.4), x / 12.92, x <= 0.04045);
 }
 
+// Encode sRGB: luz linear → codificado (só para alvo Unorm).
+fn from_linear(v: f32) -> f32 {
+    let x = clamp(v, 0.0, 1.0);
+    return select(1.055 * pow(x, 1.0 / 2.4) - 0.055, x * 12.92, x <= 0.0031308);
+}
+
+// SMPTE ST 2084: código 0–1 → nits absolutos (0–10000).
+fn pq_eotf_nits(e: f32) -> f32 {
+    let p = pow(max(e, 0.0), 1.0 / PQ_M2);
+    return pow(max(p - PQ_C1, 0.0) / (PQ_C2 - PQ_C3 * p), 1.0 / PQ_M1) * PQ_PEAK_NITS;
+}
+
+// ARIB STD-B67 inverse OETF: código 0–1 → luz de cena (OOTF à parte).
+fn hlg_inverse_oetf(e: f32) -> f32 {
+    let x = max(e, 0.0);
+    if (x <= 0.5) {
+        return x * x / 3.0;
+    }
+    return (exp((x - HLG_C) / HLG_A) + HLG_B) / 12.0;
+}
+
+// Curva filmic de Hable (Uncharted 2), sem normalização do white point.
+fn hable(x: f32) -> f32 {
+    let a = 0.15;
+    let b = 0.50;
+    let c = 0.10;
+    let d = 0.20;
+    let e = 0.02;
+    let f = 0.30;
+    return (x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f) - e / f;
+}
+
+// Sinal R'G'B' da faixa → luz de display linear (1.0 = branco de referência SDR).
+fn hdr_to_display_linear(c: vec3<f32>, mode: u32) -> vec3<f32> {
+    if (mode == 1u) {
+        return vec3<f32>(pq_eotf_nits(c.r), pq_eotf_nits(c.g), pq_eotf_nits(c.b)) / REFERENCE_WHITE_NITS;
+    }
+    // HLG: inverse OETF + OOTF (gamma de sistema 1.2) e pico relativo de 1000 nits.
+    let scene = vec3<f32>(hlg_inverse_oetf(c.r), hlg_inverse_oetf(c.g), hlg_inverse_oetf(c.b));
+    return pow(max(scene, vec3<f32>(0.0)), vec3<f32>(1.2)) * (HLG_PEAK_NITS / REFERENCE_WHITE_NITS);
+}
+
+// HDR → SDR: Hable normalizado pelo pico do conteúdo. Devolve luz de display
+// linear 0–1 (o encode do alvo fica por conta do chamador). Mesma conta do
+// `tone::tonemap_linear` em CPU.
+fn tonemap(c: vec3<f32>, mode: u32, peak_nits: f32) -> vec3<f32> {
+    let lin = hdr_to_display_linear(c, mode);
+    let white = max(peak_nits, 1.0) / REFERENCE_WHITE_NITS;
+    let scale = 1.0 / max(hable(white), 1e-6);
+    return clamp(vec3<f32>(hable(lin.r), hable(lin.g), hable(lin.b)) * scale, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = vec2<f32>(
@@ -70,7 +144,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         channel(u.row_b, y, cb, cr),
     );
     rgb = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
-    if (u.uv_off.z > 0.5) {
+    let linear_target = u.uv_off.z > 0.5;
+    let mode = u32(max(u.tone.x, 0.0) + 0.5);
+    if (mode == 1u || mode == 2u) {
+        let lin = tonemap(rgb, mode, u.tone.y);
+        if (linear_target) {
+            rgb = lin;
+        } else {
+            rgb = vec3<f32>(from_linear(lin.r), from_linear(lin.g), from_linear(lin.b));
+        }
+    } else if (linear_target) {
         rgb = vec3<f32>(to_linear(rgb.r), to_linear(rgb.g), to_linear(rgb.b));
     }
     return vec4<f32>(rgb, 1.0);

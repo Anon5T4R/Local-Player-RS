@@ -43,7 +43,13 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       stream-copy** no MP4 (divergência 5): o `corte.mp4` do teste ficava com o primeiro frame
       congelado por 55 s e duração 5:00 herdada do arquivo original; agora abre em 4:04 e toca
       desde o primeiro segundo.
-- [ ] **8. Maturação** — tonemap HDR, VFR, extração do motor como crate, contribuição dos
+- [x] **8a. Tonemap HDR → SDR (v0.5.0)** — Hable filmic no shader (EOTF PQ ST 2084 /
+      HLG inverse OETF + OOTF 1.2 → Hable com pico do MaxCLL do container > env
+      LOCALPLAYER_HDR_PEAK > 1000 nits → sRGB). Matemática espelhada em CPU com testes
+      nos pontos da spec; overlay D mostra `hdr pq -> sdr hable (N nits)`. 8-bit mantido
+      (shift_to_8 agora arredonda; pipeline R16Unorm/10-bit e BT.2390/maxRGB documentados
+      como evolução). Gamut BT.2020→709 segue fora.
+- [ ] **8. Maturação restante** - VFR, extração do motor como crate, contribuição dos
       patches upstream (`docs/upstream/`). Legenda embutida: feita na 5c.
 - [x] **9. Janela no tamanho do vídeo** (pedido do João; dev, pós-v0.3.0) — na abertura de uma
       faixa de vídeo a janela vai para o tamanho de EXIBIÇÃO do vídeo (PAR anamórfico + rotação
@@ -107,7 +113,8 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
 
 - **hwdec 4K HEVC** — MF/DXVA cobre Main/Main 10 e VP9/AV1; falta validar 4K HEVC real em
   hardware (o SW pode não segurar sozinho, e o readback GPU→CPU cresce com a resolução).
-- **HDR → SDR tonemap** — vídeo HDR sai sem conversão (cores lavadas).
+- **HDR → SDR tonemap** — ✅ v0.5.0 (Hable filmic; 8-bit com arredondamento — banding em
+  cenas escuras até o pipeline R16Unorm; gamut 2020→709 pendente).
 - **VFR** — o pipeline assume a taxa nominal declarada pelo container.
 - **ASS** — básico (styles/cores/\an/contorno); `\pos`/`\move`/`\fad`/karaokê/`\t`/desenho
   ignorados (avisos no stderr); sem colisão de linhas nem quebra automática.
