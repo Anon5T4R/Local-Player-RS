@@ -1,5 +1,6 @@
-//! Sessão do player: playlist, "retome de onde parou" e preferências
-//! (volume/mute). Tudo na pasta de config do app
+//! Sessão do player: playlist, posição por faixa (retomada EXPLÍCITA — o play
+//! abre sempre do começo; a posição salva só alimenta o botão "Retomar") e
+//! preferências (volume/mute). Tudo na pasta de config do app
 //! (`%APPDATA%\local-player-rs` no Windows, `~/.config/local-player-rs` fora).
 //!
 //! Os três arquivos são derivados e minúsculos: falha de leitura/gravação não

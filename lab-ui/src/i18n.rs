@@ -222,6 +222,10 @@ pub enum Key {
     /// Legendas externas (SRT/VTT): toggle e atraso.
     Subtitles,
     SubtitleDelay,
+    /// Retomada explícita da posição salva (o play abre sempre do começo).
+    ResumePosition,
+    /// Tooltip do botão acima, com o tempo salvo (`{time}`).
+    ResumeAt,
 }
 
 /// Todas as chaves — usado pelo teste de completude (fora de teste o match
@@ -386,6 +390,8 @@ const KEYS: &[Key] = &[
     Key::ExitFullscreen,
     Key::Subtitles,
     Key::SubtitleDelay,
+    Key::ResumePosition,
+    Key::ResumeAt,
 ];
 
 pub fn t(lang: Lang, key: Key) -> &'static str {
@@ -548,6 +554,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
         Key::ExitFullscreen => "Exit fullscreen (F)",
         Key::Subtitles => "Subtitles (S)",
         Key::SubtitleDelay => "Subtitle delay",
+        Key::ResumePosition => "Resume from last position",
+        Key::ResumeAt => "Resume from {time}",
         Key::Cpu => "CPU",
         Key::Totp => "TOTP",
         Key::SecondsShort => "s",
@@ -580,5 +588,15 @@ mod tests {
         assert_eq!(t(Lang::Pt, Key::Mute), "Mutar (M)");
         assert_eq!(t(Lang::Es, Key::Unmute), "Activar sonido (M)");
         assert_eq!(t(Lang::En, Key::Mute), "Mute (M)");
+    }
+
+    /// As chaves da retomada existem nos DOIS catálogos (faltando, `t()` cai no
+    /// inglês em silêncio e o teste de completude não veria).
+    #[test]
+    fn catalogo_tem_as_chaves_de_retomada() {
+        assert_eq!(t(Lang::Pt, Key::ResumePosition), "Retomar de onde parou");
+        assert_eq!(t(Lang::Pt, Key::ResumeAt), "Retomar de {time}");
+        assert_eq!(t(Lang::Es, Key::ResumePosition), "Reanudar desde donde quedó");
+        assert_eq!(t(Lang::Es, Key::ResumeAt), "Reanudar desde {time}");
     }
 }

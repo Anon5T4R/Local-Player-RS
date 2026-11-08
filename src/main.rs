@@ -15,6 +15,7 @@
 
 mod cli;
 mod engine;
+mod icons;
 mod metrics;
 mod queue;
 mod resume;
@@ -191,8 +192,11 @@ struct PlayerApp {
     /// Arrastando a barra de seek: o PositionHint do motor não pisa no valor.
     scrubbing: bool,
     scrub_value: f64,
-    /// Posição de retomada aguardando a duração (se caiu no fim, volta a 0).
-    pending_resume: f64,
+    /// Posição salva capturada ao abrir a faixa. Abrir é sempre do começo;
+    /// este é o gatilho do botão "Retomar" (o save do arquivo segue normal).
+    resume_at: Option<f64>,
+    /// `status` é um aviso (ganha o ícone de alerta em vez de texto puro).
+    status_warn: bool,
     /// Falhas seguidas (não gira a playlist pra sempre com arquivos quebrados).
     error_streak: usize,
     /// Throttle do resume.json (grava a cada 5 s de playback, não a cada frame).
@@ -276,7 +280,8 @@ impl PlayerApp {
             duration: 0.0,
             scrubbing: false,
             scrub_value: 0.0,
-            pending_resume: 0.0,
+            resume_at: None,
+            status_warn: false,
             error_streak: 0,
             last_resume_save: Instant::now(),
             video: None,
@@ -301,20 +306,26 @@ impl PlayerApp {
         app
     }
 
-    /// Seleciona a faixa `i` e manda o motor abrir (retomando a posição salva).
+    /// Seleciona a faixa `i` e manda o motor abrir.
+    ///
+    /// Sempre do começo: retomar de onde parou é uma ação EXPLÍCITA do usuário
+    /// (botão "Retomar"), nunca automática. A posição salva fica em
+    /// `resume_at` só para oferecer o botão.
     fn select(&mut self, i: usize) {
         let Some(path) = self.playlist.files.get(i).cloned() else {
             return;
         };
         self.remember_current();
-        let start = resume::position_of(&self.resume, &path).unwrap_or(0.0);
+        let saved = resume::position_of(&self.resume, &path);
+        let start = open_position(false, saved, self.duration);
+        self.resume_at = saved;
         self.idx = Some(i);
         self.now = file_name(&path);
         self.status.clear();
+        self.status_warn = false;
         self.position = start;
         self.duration = 0.0;
         self.scrubbing = false;
-        self.pending_resume = start;
         self.drop_video();
         self.last_video_pts = start;
         self.engine.play(&path, start);
@@ -358,6 +369,33 @@ impl PlayerApp {
         self.drop_video();
         self.transport = engine::Transport::Stopped;
         self.position = 0.0;
+    }
+
+    /// Posição que o botão "Retomar" oferece agora: a posição salva da faixa
+    /// quando ela é digna de retomada (`resumable`) e ainda está à frente do
+    /// ponto atual. Passado o ponto salvo, o botão desaparece.
+    fn resume_point(&self) -> Option<f64> {
+        let point = resumable(self.resume_at?, self.duration)?;
+        (self.position + 5.0 < point).then_some(point)
+    }
+
+    /// Retomada explícita (botão "Retomar"): toca a faixa na posição salva.
+    fn resume_playback(&mut self, point: f64) {
+        let point = open_position(true, Some(point), self.duration);
+        if point <= 0.0 {
+            return;
+        }
+        match self.transport {
+            engine::Transport::Stopped => {
+                if let Some(path) = self.idx.and_then(|i| self.playlist.files.get(i)).cloned() {
+                    self.error_streak = 0;
+                    self.position = point;
+                    self.last_video_pts = point;
+                    self.engine.play(&path, point);
+                }
+            }
+            _ => self.seek_to(point),
+        }
     }
 
     fn seek_to(&mut self, secs: f64) {
@@ -435,12 +473,6 @@ impl PlayerApp {
                         self.session.track(&path, &info);
                     }
                 }
-                // Posição salva caiu no fim (ou além do fim): recomeça do zero.
-                if self.pending_resume > 0.0 && d > 0.0 && self.pending_resume >= d - 3.0 {
-                    self.pending_resume = 0.0;
-                    self.position = 0.0;
-                    self.engine.seek(0.0);
-                }
             }
             engine::Event::PositionHint { position, duration } => {
                 self.position = position;
@@ -465,7 +497,8 @@ impl PlayerApp {
                 if e.kind() != engine::ErrorKind::Seek {
                     self.error_streak += 1;
                 }
-                self.status = format!("⚠ {}", self.error_text(e.kind()));
+                self.status = self.error_text(e.kind()).to_owned();
+                self.status_warn = true;
                 eprintln!("engine: {e}");
             }
             engine::Event::VideoOpened(pipeline) => {
@@ -603,6 +636,7 @@ impl PlayerApp {
         self.subtitle_delay = (self.subtitle_delay + delta).clamp(-60.0, 60.0);
         let lang = self.cfg.lang;
         self.status = format!("{} {:+.1} {}", i18n::t(lang, Key::SubtitleDelay), self.subtitle_delay, i18n::t(lang, Key::SecondsShort));
+        self.status_warn = false;
     }
 
     /// Carrega a legenda externa do arquivo atual. Sem arquivo ao lado (ou sem
@@ -706,7 +740,8 @@ impl PlayerApp {
 
         if let Some((kind, detail)) = failure {
             eprintln!("engine: vídeo: {detail}");
-            self.status = format!("⚠ {}", self.error_text(kind));
+            self.status = self.error_text(kind).to_owned();
+            self.status_warn = true;
             self.error_streak += 1;
             self.engine.stop();
             self.drop_video();
@@ -836,67 +871,92 @@ impl PlayerApp {
     }
 
     /// Barra de controles do player (painel na janela, overlay no fullscreen).
+    ///
+    /// Linha 1: transporte + relógio (esquerda) e volume/tela cheia/legenda
+    /// (direita). Linha 2: seek de largura cheia. Depois: "Retomar" (só com
+    /// posição salva digna) e a linha de status. Os ícones são desenhados
+    /// (`src/icons.rs`): os glyphs de fonte que estavam aqui (⏮ ▶ ⏸ ⏹ ⏭ 🔇 🔊)
+    /// não existem nas fontes embutidas e saíam todos com o MESMO glifo de
+    /// "falta" — o bug dos quatro botões idênticos do print.
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
         let lang = self.cfg.lang;
         let t = |k: Key| i18n::t(lang, k);
         let can_play = self.idx.is_some();
-        // Capricho: transporte agrupado, tempo em campo fixo (o relógio não
-        // "pula" a cada segundo com fonte monoespaçada de largura variável).
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.horizontal(|ui| {
-            if ui.add_enabled(can_play, egui::Button::new("⏮")).on_hover_text(t(Key::Previous)).clicked() {
+            if icons::icon_button(ui, icons::Icon::Previous, t(Key::Previous), false, can_play).on_hover_text(t(Key::Previous)).clicked() {
                 self.play_prev();
             }
-            let (icon, hover) = if self.transport.is_playing() { ("⏸", t(Key::Pause)) } else { ("▶", t(Key::Play)) };
-            if ui.add_enabled(can_play, egui::Button::new(icon)).on_hover_text(hover).clicked() {
+            let (icon, hover) = if self.transport.is_playing() { (icons::Icon::Pause, t(Key::Pause)) } else { (icons::Icon::Play, t(Key::Play)) };
+            if icons::icon_button(ui, icon, hover, false, can_play).on_hover_text(hover).clicked() {
                 self.toggle_play();
             }
-            if ui.add_enabled(can_play, egui::Button::new("⏹")).on_hover_text(t(Key::Stop)).clicked() {
+            if icons::icon_button(ui, icons::Icon::Stop, t(Key::Stop), false, can_play).on_hover_text(t(Key::Stop)).clicked() {
                 self.stop_playback();
             }
-            if ui.add_enabled(can_play, egui::Button::new("⏭")).on_hover_text(t(Key::Next)).clicked() {
+            if icons::icon_button(ui, icons::Icon::Next, t(Key::Next), false, can_play).on_hover_text(t(Key::Next)).clicked() {
                 self.play_next();
             }
-            ui.add_space(2.0);
+            ui.add_space(4.0);
+            // Relógio em fonte de largura fixa: o tempo não "pula" a cada segundo.
             ui.label(egui::RichText::new(format!("{:>8} / {:>8}", fmt_time(self.position), fmt_time(self.duration))).monospace());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let (icon, hover) = if self.muted { ("🔇", t(Key::Unmute)) } else { ("🔊", t(Key::Mute)) };
-                if ui.selectable_label(self.muted, icon).on_hover_text(hover).clicked() {
+                let (icon, hover) = if self.muted { (icons::Icon::Muted, t(Key::Unmute)) } else { (icons::Icon::Volume, t(Key::Mute)) };
+                if icons::icon_button(ui, icon, hover, self.muted, true).on_hover_text(hover).clicked() {
                     self.toggle_mute();
                 }
-                ui.spacing_mut().slider_width = 96.0;
-                let volume = ui.add(egui::Slider::new(&mut self.volume, 0.0..=100.0).show_value(false)).on_hover_text(t(Key::Volume));
+                // O volume come o que sobra da linha: com vídeo aparecem girar
+                // e legenda, e o slider encolhe em vez de estourar por cima do
+                // relógio (janela de 480 pts).
+                let trailing = if self.video.is_some() { 3.0 } else { 1.0 };
+                let reserved = trailing * (icons::BUTTON.x + ui.spacing().item_spacing.x) + 4.0;
+                ui.spacing_mut().slider_width = (ui.available_width() - reserved).clamp(40.0, 96.0);
+                let volume =
+                    ui.add(egui::Slider::new(&mut self.volume, 0.0..=100.0).show_value(false).trailing_fill(true)).on_hover_text(t(Key::Volume));
                 if volume.changed() {
                     self.engine.set_volume((self.volume / 100.0) as f32);
                 }
                 if volume.drag_stopped() {
                     self.save_prefs();
                 }
-                let (icon, hover) = if self.fullscreen { ("⤡", t(Key::ExitFullscreen)) } else { ("⛶", t(Key::Fullscreen)) };
-                if ui.selectable_label(self.fullscreen, icon).on_hover_text(hover).clicked() {
+                let (icon, hover) = if self.fullscreen {
+                    (icons::Icon::ExitFullscreen, t(Key::ExitFullscreen))
+                } else {
+                    (icons::Icon::Fullscreen, t(Key::Fullscreen))
+                };
+                if icons::icon_button(ui, icon, hover, self.fullscreen, true).on_hover_text(hover).clicked() {
                     self.toggle_fullscreen(ui.ctx());
                 }
-                if self.video.is_some() && ui.selectable_label(false, "⟳").on_hover_text(t(Key::Rotate)).clicked() {
-                    self.rotate(ui.ctx(), 1);
-                }
-                let cc_on = self.subtitles_on && self.subtitles.is_some();
-                let cc_hover = match self.subtitles.as_ref() {
-                    Some(subs) => format!("{}\n{}", t(Key::Subtitles), subs.path),
-                    None => t(Key::Subtitles).to_owned(),
-                };
-                if self.video.is_some()
-                    && ui.add_enabled(self.subtitles.is_some(), egui::Button::selectable(cc_on, "CC")).on_hover_text(cc_hover).clicked()
-                {
-                    self.toggle_subtitles();
+                if self.video.is_some() {
+                    if icons::icon_button(ui, icons::Icon::Rotate, t(Key::Rotate), false, true).on_hover_text(t(Key::Rotate)).clicked() {
+                        self.rotate(ui.ctx(), 1);
+                    }
+                    let cc_on = self.subtitles_on && self.subtitles.is_some();
+                    let cc_hover = match self.subtitles.as_ref() {
+                        Some(subs) => format!("{}\n{}", t(Key::Subtitles), subs.path),
+                        None => t(Key::Subtitles).to_owned(),
+                    };
+                    if icons::icon_button(ui, icons::Icon::Subtitles, t(Key::Subtitles), cc_on, self.subtitles.is_some())
+                        .on_hover_text(cc_hover)
+                        .clicked()
+                    {
+                        self.toggle_subtitles();
+                    }
                 }
             });
         });
-        ui.add_space(2.0);
+        ui.add_space(4.0);
         // Seek: durante o arrasto a UI manda; fora dele a posição vem do
-        // relógio mestre (PositionHint).
+        // relógio mestre (PositionHint). Antes o slider ficava com a largura
+        // padrão do egui (100 pts) e aparecia como um slider órfão no canto.
         let dur = self.duration.max(0.0);
         let mut value = if self.scrubbing { self.scrub_value } else { self.position.clamp(0.0, dur) };
-        let bar = ui.add_enabled(dur > 0.0, egui::Slider::new(&mut value, 0.0..=dur.max(0.001)).show_value(false));
+        let bar = ui
+            .scope(|ui| {
+                ui.spacing_mut().slider_width = ui.available_width().max(80.0);
+                ui.add_enabled(dur > 0.0, egui::Slider::new(&mut value, 0.0..=dur.max(0.001)).show_value(false).trailing_fill(true))
+            })
+            .inner;
         if bar.drag_started() {
             self.scrubbing = true;
         }
@@ -907,8 +967,23 @@ impl PlayerApp {
             self.scrubbing = false;
             self.seek_to(value);
         }
+        // Retomar: só quando a posição salva vale a pena e ainda estamos antes
+        // dela (passado o ponto, não há para onde voltar).
+        if let Some(point) = self.resume_point() {
+            ui.add_space(2.0);
+            let hover = i18n::t(lang, Key::ResumeAt).replace("{time}", &fmt_time(point));
+            if ghost(ui, t(Key::ResumePosition)).on_hover_text(hover).clicked() {
+                self.resume_playback(point);
+            }
+        }
         if !self.status.is_empty() {
-            ui.label(egui::RichText::new(&self.status).small().weak());
+            ui.horizontal(|ui| {
+                if self.status_warn {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    icons::paint(ui, rect, icons::Icon::Warning, ui.visuals().warn_fg_color);
+                }
+                ui.label(egui::RichText::new(&self.status).small().weak());
+            });
         }
     }
 
@@ -1007,10 +1082,12 @@ impl eframe::App for PlayerApp {
         match self.updater.status().clone() {
             craft_update::updater::Status::UpToDate => {
                 self.status = t(Key::UpToDate).into();
+                self.status_warn = false;
                 self.updater.dismiss_status();
             }
             craft_update::updater::Status::Failed(e) => {
                 self.status = e;
+                self.status_warn = true;
                 self.updater.dismiss_status();
             }
             _ => {}
@@ -1028,7 +1105,10 @@ impl eframe::App for PlayerApp {
                         }
                         resume::save_playlist(&self.playlist);
                     }
-                    Err(e) => self.status = format!("⚠ {e}"),
+                    Err(e) => {
+                        self.status = e;
+                        self.status_warn = true;
+                    }
                 }
                 self.dir_rx = None;
             } else {
@@ -1119,6 +1199,8 @@ impl eframe::App for PlayerApp {
                             self.idx = None;
                             self.now.clear();
                             self.status.clear();
+                            self.status_warn = false;
+                            self.resume_at = None;
                             self.engine.stop();
                             self.transport = engine::Transport::Stopped;
                             self.position = 0.0;
@@ -1128,12 +1210,13 @@ impl eframe::App for PlayerApp {
                         }
                     });
                 });
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     // Sem clone por frame: só os índices.
                     for i in 0..self.playlist.files.len() {
                         let name = file_name(&self.playlist.files[i]);
                         let is_now = self.idx == Some(i);
-                        if ui.selectable_label(is_now, &name).clicked() {
+                        let clicked = playlist_row(ui, &name, is_now, &self.playlist.files[i]).clicked();
+                        if clicked {
                             self.error_streak = 0;
                             self.select(i);
                         }
@@ -1165,7 +1248,7 @@ impl eframe::App for PlayerApp {
         if self.fullscreen && !hide_chrome {
             egui::Area::new(egui::Id::unique("controles-fullscreen")).anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0)).show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(420.0);
+                    ui.set_min_width(520.0);
                     self.controls_panel(ui);
                 });
             });
@@ -1221,9 +1304,56 @@ fn ghost(ui: &mut egui::Ui, label: &str) -> egui::Response {
     resp
 }
 
+/// Linha da playlist: largura toda, altura fixa e o par hover/seleção do tema
+/// (mesmo tratamento de lista dos irmãos, com o caminho completo no tooltip).
+fn playlist_row(ui: &mut egui::Ui, name: &str, selected: bool, path: &str) -> egui::Response {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name));
+    let visuals = ui.visuals();
+    let fill = if selected {
+        visuals.selection.bg_fill
+    } else if response.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if fill != egui::Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, visuals.widgets.inactive.corner_radius, fill);
+    }
+    let color = if selected { visuals.strong_text_color() } else { visuals.text_color() };
+    let galley = ui.painter().layout_no_wrap(name.to_owned(), egui::TextStyle::Button.resolve(ui.style()), color);
+    let pos = egui::pos2(rect.left() + 6.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(pos, galley, color);
+    response.on_hover_text(path)
+}
+
 /// Nome do arquivo para exibição (fallback: o caminho inteiro).
 fn file_name(path: &str) -> String {
     std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string())
+}
+
+/// Progresso mínimo que vale retomar (10 s) e a folga até o fim (30 s).
+const RESUME_MIN_SECS: f64 = 10.0;
+const RESUME_END_SECS: f64 = 30.0;
+
+/// Posição salva digna de "Retomar": pelo menos [`RESUME_MIN_SECS`] de faixa
+/// ouvida e pelo menos [`RESUME_END_SECS`] antes do fim (retomar quase no fim
+/// não faz sentido). Duração desconhecida ou inválida não convida a retomar.
+fn resumable(saved: f64, duration: f64) -> Option<f64> {
+    if !saved.is_finite() || !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+    (saved >= RESUME_MIN_SECS && saved <= duration - RESUME_END_SECS).then_some(saved)
+}
+
+/// Onde o play abre a faixa: **sempre do começo** por padrão — retomar é uma
+/// ação explícita (`use_resume`) e só vale se a posição salva for `resumable`.
+fn open_position(use_resume: bool, saved: Option<f64>, duration: f64) -> f64 {
+    match saved {
+        Some(saved) if use_resume => resumable(saved, duration).unwrap_or(0.0),
+        _ => 0.0,
+    }
 }
 
 /// "m:ss" (ou "h:mm:ss" acima de 1 h); duração desconhecida = 0:00.
@@ -1415,5 +1545,40 @@ mod tests {
         assert!(text.contains("hwdec"), "{text}");
         assert!(text.contains("Media Foundation · hardware"), "{text}");
         assert!(text.contains("12 frames"), "{text}");
+    }
+
+    /// O botão "Retomar" só aparece fora das bordas: pelo menos 10 s de faixa
+    /// ouvida e pelo menos 30 s antes do fim.
+    #[test]
+    fn retomar_so_vale_fora_das_bordas() {
+        // Começo: menos de 10 s não vale retomar.
+        assert_eq!(resumable(9.9, 3600.0), None);
+        assert_eq!(resumable(0.0, 3600.0), None);
+        assert_eq!(resumable(10.0, 3600.0), Some(10.0));
+        // Fim: 30 s antes do fim ainda vale; a menos disso, não.
+        assert_eq!(resumable(3570.0, 3600.0), Some(3570.0));
+        assert_eq!(resumable(3570.1, 3600.0), None);
+        assert_eq!(resumable(3600.0, 3600.0), None);
+        // Duração desconhecida ou inválida, e posição salva inválida, não convidam.
+        assert_eq!(resumable(120.0, 0.0), None);
+        assert_eq!(resumable(120.0, f64::NAN), None);
+        assert_eq!(resumable(120.0, f64::INFINITY), None);
+        assert_eq!(resumable(f64::NAN, 3600.0), None);
+        // Faixa curta: as duas bordas só coexistem na janela exata de 10 s.
+        assert_eq!(resumable(10.0, 40.0), Some(10.0));
+        assert_eq!(resumable(11.0, 40.0), None);
+    }
+
+    /// Play sem o botão "Retomar" começa SEMPRE do zero; só o pedido explícito
+    /// (e válido) abre na posição salva.
+    #[test]
+    fn play_sem_retomar_comeca_do_zero() {
+        assert_eq!(open_position(false, Some(1200.0), 3600.0), 0.0);
+        assert_eq!(open_position(false, None, 3600.0), 0.0);
+        assert_eq!(open_position(true, Some(1200.0), 3600.0), 1200.0);
+        // Pedido explícito com posição fora da faixa digna também abre do começo.
+        assert_eq!(open_position(true, Some(2.0), 3600.0), 0.0);
+        assert_eq!(open_position(true, Some(3590.0), 3600.0), 0.0);
+        assert_eq!(open_position(true, None, 3600.0), 0.0);
     }
 }
