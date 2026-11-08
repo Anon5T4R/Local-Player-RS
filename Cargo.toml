@@ -31,7 +31,7 @@ winit = { path = "libs/winit/" }
 
 [package]
 name = "local-player-rs"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 publish = false
@@ -57,6 +57,10 @@ craft-update = { path = "libs/craft-libs/crates/update", features = ["egui"] }
 # Motor de decode (fase 2): containers + codecs clean-room do FilmCraft
 # (vendored em libs/filmcraft) e o bootstrap de áudio do symphonia.
 filmcraft-codecs = { path = "libs/filmcraft/crates/codecs" }
+# hwdec como primeira opção (Windows): Media Foundation + DXVA na frente dos
+# decoders pure-Rust, com fallback SW transparente. Recorte de
+# `filmcraft-platform` (só o decoder de vídeo; sem project/render/export/encoders).
+filmcraft-hwdec = { path = "libs/filmcraft/crates/hwdec" }
 # Trait MediaSource/AudioBuffer do mesmo snapshot vendored: o Opus em Ogg usa o
 # OggSource do FilmCraft (o symphonia 0.5 não tem decodificador Opus) e a fase 3
 # lê vídeo e áudio de containers pelo mesmo `SharedSource`.

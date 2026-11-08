@@ -76,6 +76,10 @@ fn main() -> eframe::Result<()> {
     // a configuração na criação do cache).
     engine::configure_frame_cache();
 
+    // hwdec como primeira opção ANTES de qualquer mídia abrir (o hub tenta os
+    // decoders registrados primeiro; --probe/--bench também passam por aqui).
+    let _ = engine::register_hwdec();
+
     // Diagnóstico sem janela: --probe / --bench / --help / --version saem aqui.
     if let Some(code) = cli::run(&args) {
         std::process::exit(code);
@@ -633,6 +637,9 @@ impl PlayerApp {
         let generation = pipeline.generation;
         let has_audio = pipeline.has_audio;
         let par = pipeline.info.par;
+        // hwdec da faixa: o log de sessão ganha uma linha quando o modo fica
+        // conhecido (hardware, software, ou a queda para o software no meio).
+        self.session.hwdec(&self.metrics.hw_usage());
         let mut messages = Vec::new();
         while let Some(msg) = pipeline.try_recv() {
             messages.push(msg);
@@ -1264,6 +1271,7 @@ fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64) -> String {
             ],
         ));
     }
+    rows.push(("hwdec", vec![s.hw.summary(), format!("{} frames", s.hw.frames)]));
     // Sem duração do motor, a do container serve; posição pode passar do fim
     // por um frame (o relógio mestre corre antes do `TrackEnded`).
     let total = if duration > 0.0 { duration } else { s.track.as_ref().map_or(0.0, |t| t.duration) };
@@ -1394,5 +1402,18 @@ mod tests {
         let text = stats_text(&snapshot, 5.0, 0.0);
         assert!(text.contains("0:05 / 0:00"), "{text}");
         assert!(text.contains("0.0%"), "{text}");
+    }
+
+    /// O overlay ganha a linha do hwdec com o decoder em uso (MF vs SW).
+    #[test]
+    fn overlay_mostra_hwdec() {
+        let snapshot = metrics::Snapshot {
+            hw: metrics::HwUsage { mode: metrics::HwMode::Hardware, backend: Some("Media Foundation"), frames: 12, ..Default::default() },
+            ..Default::default()
+        };
+        let text = stats_text(&snapshot, 0.0, 0.0);
+        assert!(text.contains("hwdec"), "{text}");
+        assert!(text.contains("Media Foundation · hardware"), "{text}");
+        assert!(text.contains("12 frames"), "{text}");
     }
 }

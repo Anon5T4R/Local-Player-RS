@@ -25,6 +25,7 @@ members = [
     "crates/frame",
     "crates/h264",
     "crates/hevc",
+    "crates/hwdec",
     "crates/isobmff",
     "crates/matroska",
     "crates/media",
@@ -77,6 +78,7 @@ filmcraft-opus = { version = "0.13.0", path = "crates/opus" }
 filmcraft-frame = { version = "0.13.0", path = "crates/frame" }
 filmcraft-media = { version = "0.13.0", path = "crates/media" }
 filmcraft-codecs = { version = "0.13.0", path = "crates/codecs" }
+filmcraft-hwdec = { version = "0.13.0", path = "crates/hwdec" }
 filmcraft-testkit = { version = "0.13.0", path = "crates/testkit" }
 
 # foundation

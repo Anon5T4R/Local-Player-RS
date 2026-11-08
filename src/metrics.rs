@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use filmcraft_codecs::hw::HwStats;
+
 /// Amostras de latência de decode na janela do p95 (~10 s a 60 fps).
 const WINDOW: usize = 512;
 /// De quanto em quanto tempo as taxas (fps) são recalculadas.
@@ -76,6 +78,105 @@ pub fn estimate_bitrate(file_size: Option<u64>, duration: f64) -> Option<u64> {
     Some((bytes as f64 * 8.0 / duration) as u64)
 }
 
+/// Qual decoder está produzindo a imagem da faixa atual (overlay/log/bench).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HwMode {
+    /// Sem faixa de vídeo aberta.
+    #[default]
+    Idle,
+    /// O switch de hardware decoding está desligado.
+    Off,
+    /// O decoder de hardware pegou a faixa (nenhum quadro saiu ainda).
+    Pending,
+    /// Decodificando no hardware do sistema (Windows: Media Foundation / DXVA).
+    Hardware,
+    /// O hardware começou e caiu para o decoder SW no meio do stream.
+    HardwareThenSoftware,
+    /// Decodificador pure-Rust (sem caminho de hardware para o codec, recusado, ou sem backend).
+    Software,
+}
+
+impl HwMode {
+    /// Texto curto do modo (coluna do overlay; o rótulo com backend fica em [`HwUsage::summary`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "-",
+            Self::Off => "off",
+            Self::Pending => "pending",
+            Self::Hardware => "hardware",
+            Self::HardwareThenSoftware => "hardware → software",
+            Self::Software => "software",
+        }
+    }
+}
+
+/// O decoder em uso na faixa atual. Os contadores são do hub (globais e
+/// monotônicos); [`Metrics::set_track`] rebaseia a contagem a cada faixa, então
+/// os campos são o que aconteceu **desde a abertura** da faixa.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HwUsage {
+    pub mode: HwMode,
+    /// Backend registrado no arranque ("Media Foundation"), quando há.
+    pub backend: Option<&'static str>,
+    /// Quadros que saíram do decoder de hardware.
+    pub frames: u64,
+    /// Sessões de hardware criadas (uma por decoder; seek reusa).
+    pub sessions: u64,
+    /// Streams que a factory recusou e foram para o software.
+    pub declined: u64,
+    /// Decoders de hardware que falharam no meio e continuaram em software.
+    pub fallbacks: u64,
+}
+
+impl HwUsage {
+    /// Uma célula do overlay: `on/off` e **qual** decoder (MF vs SW).
+    pub fn summary(&self) -> String {
+        match self.mode {
+            HwMode::Idle => "-".into(),
+            HwMode::Off => "off".into(),
+            HwMode::Pending => "pending".into(),
+            HwMode::Hardware => format!("{} · hardware", self.backend.unwrap_or("hw")),
+            HwMode::HardwareThenSoftware => format!("{} · hardware → software", self.backend.unwrap_or("hw")),
+            HwMode::Software => "software".into(),
+        }
+    }
+}
+
+/// A escolha de decoder a partir dos contadores e do stream. Pura: a matriz é
+/// testada sem GPU (o teste de integração real é o `--bench`).
+///
+/// `codec_takes_hardware` = a família do codec está entre as que o backend
+/// decodifica (H.264/HEVC/VP9/AV1); o perfil/bit depth ainda podem recusar, e aí
+/// o contador `declined` conta a história.
+fn hw_mode(policy: bool, backend: Option<&'static str>, codec_takes_hardware: bool, d: HwStats) -> HwMode {
+    if !policy {
+        return HwMode::Off;
+    }
+    if backend.is_none() {
+        // Plataforma sem backend (Linux/macOS por enquanto) ou registro falhou.
+        return HwMode::Software;
+    }
+    if d.fallbacks > 0 {
+        return HwMode::HardwareThenSoftware;
+    }
+    if d.frames > 0 {
+        return HwMode::Hardware;
+    }
+    if d.declined > 0 || !codec_takes_hardware {
+        return HwMode::Software;
+    }
+    HwMode::Pending
+}
+
+pub(crate) fn hw_delta(before: HwStats, after: HwStats) -> HwStats {
+    HwStats {
+        frames: after.frames.saturating_sub(before.frames),
+        sessions: after.sessions.saturating_sub(before.sessions),
+        declined: after.declined.saturating_sub(before.declined),
+        fallbacks: after.fallbacks.saturating_sub(before.fallbacks),
+    }
+}
+
 /// Fotografia dos contadores para o overlay/CSV.
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -109,6 +210,8 @@ pub struct Snapshot {
     /// Segundos desde a criação da instância.
     pub elapsed_s: f64,
     pub track: Option<TrackInfo>,
+    /// Decoder em uso na faixa (hwdec on/off e qual backend).
+    pub hw: HwUsage,
 }
 
 impl Snapshot {
@@ -201,6 +304,8 @@ pub struct Metrics {
     /// `elapsed().as_nanos()` do último repaint (0 = primeiro ainda).
     repaint_last_ns: AtomicU64,
     track: Mutex<Option<TrackInfo>>,
+    /// Contadores de hardware no momento em que a faixa abriu (as taxas por faixa).
+    hw_base: Mutex<HwStats>,
     rates: Mutex<Rates>,
     log: Mutex<Option<Log>>,
 }
@@ -233,6 +338,7 @@ impl Metrics {
             repaint_us: AtomicU64::new(0),
             repaint_last_ns: AtomicU64::new(0),
             track: Mutex::new(None),
+            hw_base: Mutex::new(HwStats::default()),
             rates: Mutex::new(Rates::new(now)),
             log: Mutex::new(log),
         }
@@ -246,9 +352,27 @@ impl Metrics {
         self.log.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Faixa aberta (metadados para overlay/CSV).
+    /// Faixa aberta (metadados para overlay/CSV). Rebaseia os contadores de
+    /// hardware: os do hub são globais e monotônicos.
     pub fn set_track(&self, info: TrackInfo) {
         *self.track.lock().unwrap_or_else(PoisonError::into_inner) = Some(info);
+        *self.hw_base.lock().unwrap_or_else(PoisonError::into_inner) = filmcraft_codecs::hw::hw_stats();
+    }
+
+    /// Decoder em uso na faixa atual (barato: só átomos + o track).
+    pub fn hw_usage(&self) -> HwUsage {
+        let delta = hw_delta(*self.hw_base.lock().unwrap_or_else(PoisonError::into_inner), filmcraft_codecs::hw::hw_stats());
+        let backend = filmcraft_codecs::hw::hw_backend();
+        let track = self.track.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let video = track.as_ref().and_then(|t| t.video_codec.as_deref());
+        let mode = match video {
+            None => HwMode::Idle,
+            Some(codec) => {
+                let takes = filmcraft_hwdec::codec::family(codec).is_some();
+                hw_mode(filmcraft_codecs::hw::hardware_decoding(), backend, takes, delta)
+            }
+        };
+        HwUsage { mode, backend, frames: delta.frames, sessions: delta.sessions, declined: delta.declined, fallbacks: delta.fallbacks }
     }
 
     /// Uma requisição de frame ao decoder terminou (`elapsed` = decode + planos).
@@ -373,6 +497,10 @@ impl Metrics {
         let upload_last = self.upload_last_us.load(Ordering::Relaxed) as f64 / 1e3;
         let upload_max = self.upload_max_us.load(Ordering::Relaxed) as f64 / 1e3;
         let repaint_ms = rates.repaint_ms;
+        // Fora do literal: um `MutexGuard` temporário de campo vive até o fim do
+        // statement, e `hw_usage()` pega o mesmo lock do track de novo.
+        let track = self.track.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let hw = self.hw_usage();
         Snapshot {
             decode_fps: rates.decode_fps,
             decode_avg_ms: avg_window,
@@ -393,7 +521,8 @@ impl Metrics {
             rss_peak_mb: rates.rss_peak_mb,
             cache_mb: bytes_to_mb(filmcraft_codecs::cached_bytes() as u64),
             elapsed_s: self.started.elapsed().as_secs_f64(),
-            track: self.track.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            track,
+            hw,
         }
     }
 }
@@ -542,5 +671,32 @@ mod tests {
         assert_eq!(estimate_bitrate(Some(1 << 20), 8.0), Some(1 << 20));
         assert_eq!(estimate_bitrate(Some(1 << 20), 0.0), None);
         assert_eq!(estimate_bitrate(None, 10.0), None);
+    }
+
+    #[test]
+    fn modo_do_hwdec_segue_politica_codec_e_contadores() {
+        let s = |frames, sessions, declined, fallbacks| HwStats { frames, sessions, declined, fallbacks };
+        // Switch off vence tudo.
+        assert_eq!(hw_mode(false, Some("Media Foundation"), true, s(100, 1, 0, 0)), HwMode::Off);
+        // Sem backend registrado (Linux/macOS por enquanto): software.
+        assert_eq!(hw_mode(true, None, true, s(0, 0, 0, 0)), HwMode::Software);
+        // Codec fora do backend: software desde já (sem esperar o primeiro frame).
+        assert_eq!(hw_mode(true, Some("Media Foundation"), false, s(0, 0, 0, 0)), HwMode::Software);
+        // Faixa H.264 e nada decodeado ainda: pendente.
+        assert_eq!(hw_mode(true, Some("Media Foundation"), true, s(0, 0, 0, 0)), HwMode::Pending);
+        // Sessão criada, quadros saindo: hardware.
+        assert_eq!(hw_mode(true, Some("Media Foundation"), true, s(42, 1, 0, 0)), HwMode::Hardware);
+        // Hardware falhou no meio: hardware → software.
+        assert_eq!(hw_mode(true, Some("Media Foundation"), true, s(42, 1, 0, 1)), HwMode::HardwareThenSoftware);
+        // A factory recusou o stream (perfil/tamanho): software.
+        assert_eq!(hw_mode(true, Some("Media Foundation"), true, s(0, 0, 1, 0)), HwMode::Software);
+    }
+
+    #[test]
+    fn uso_do_hwdec_resume_o_modo() {
+        let usage = HwUsage { mode: HwMode::Hardware, backend: Some("Media Foundation"), frames: 7, sessions: 1, declined: 0, fallbacks: 0 };
+        assert_eq!(usage.summary(), "Media Foundation · hardware");
+        assert_eq!(HwUsage { mode: HwMode::Software, ..usage.clone() }.summary(), "software");
+        assert_eq!(HwUsage { mode: HwMode::Idle, ..usage }.summary(), "-");
     }
 }

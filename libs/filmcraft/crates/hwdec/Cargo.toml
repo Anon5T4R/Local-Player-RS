@@ -1,0 +1,48 @@
+[package]
+name = "filmcraft-hwdec"
+description = "OS hardware video decoding for players: Media Foundation / DXVA on Windows, with a transparent fallback to the pure-Rust decoders. Extracted from FilmCraft's filmcraft-platform (the editor's project/render/export dependencies are not pulled in)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Fork local-player-rs: this is `filmcraft-platform`'s Windows video decoder and the pieces it
+# needs (Annex B conversion, biplanar readback, the hybrid software fallback), nothing else — no
+# encoders (NVENC/VideoToolbox), no VA-API/NVDEC yet, and none of the editor crates the upstream
+# platform depends on (project, render, export, engine). `unsafe_code` is allowed only in the FFI
+# modules (`media_foundation::{gpu,mft}`), each `unsafe` block with a `// SAFETY:` comment, as
+# upstream does (storytold/filmcraft docs/adr/0001-platform-ffi.md).
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+type_complexity = "allow"
+undocumented_unsafe_blocks = "deny"
+
+[dependencies]
+filmcraft-codecs = { workspace = true }
+filmcraft-color = { workspace = true }
+filmcraft-frame = { workspace = true }
+filmcraft-isobmff = { workspace = true }
+filmcraft-time = { workspace = true }
+log = { workspace = true }
+
+# Windows: Media Foundation decoder MFTs + Direct3D 11 / DXVA through the official `windows`
+# bindings (same version and features as upstream's platform crate; already in the app's lockfile
+# through wgpu/winit).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }

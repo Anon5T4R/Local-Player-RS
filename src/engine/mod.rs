@@ -69,6 +69,20 @@ pub fn configure_frame_cache() {
     filmcraft_codecs::gop::set_frame_cache_budget(bytes);
 }
 
+/// hwdec como primeira opção: registra o decoder de hardware do sistema na
+/// frente dos pure-Rust do hub (Windows: Media Foundation + DXVA). Chamado no
+/// arranque, antes de qualquer mídia abrir — inclusive `--probe`/`--bench`.
+///
+/// Streams que o decoder de hardware recusa (codec/perfil/bit depth/tamanho,
+/// sem GPU, switch off) e falhas no meio do stream caem no decoder SW sem o
+/// chamador saber (`HybridDecoder`); nada fica indecodificável. Linux/macOS:
+/// sem efeito até a fase da plataforma (o SW é a fundação).
+pub fn register_hwdec() -> filmcraft_hwdec::Availability {
+    let availability = filmcraft_hwdec::register();
+    eprintln!("hwdec: {availability:?}");
+    availability
+}
+
 /// Comandos da UI para o motor.
 enum Cmd {
     /// Abre `path` (posição inicial em segundos) e toca.

@@ -5,7 +5,7 @@ OutFile "..\..\local-player-rs-setup.exe"
 InstallDir "$PROGRAMFILES64\Local Player RS"
 RequestExecutionLevel admin
 
-!define VERSION "0.1.2"
+!define VERSION "0.2.0"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY

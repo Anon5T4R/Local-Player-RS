@@ -80,6 +80,41 @@ O `Cargo.toml` do fork é o do app, não o do upstream:
 
 Nada disso é mudança de código upstream: é empacotamento do vendor. **Não submeter.**
 
+## Divergência 3 — decoder de vídeo do `platform` recortado (`crates/hwdec`, crate `filmcraft-hwdec`)
+
+**O que muda.** O decoder de vídeo por hardware do Windows saiu de `filmcraft-platform` como um
+crate próprio no fork:
+
+- copiados sem mudança de comportamento: `media_foundation/{mod,gpu,mft,stream}.rs`, `annexb.rs`,
+  `biplanar.rs`, `hybrid.rs` (o upstream inteiro, menos `cursor`/encoders);
+- `lib.rs` reescrito só com o registro de decoder (`register`/`registered`/`available`) e a factory
+  de Media Foundation — sem NVENC, VideoToolbox encode, VA-API, NVDEC nem as probes de export;
+- `codec.rs` novo: família/bit depth/decisão puros (testáveis sem GPU) e o `probe()` do `--probe`,
+  que responde "provável" sem criar decoder MFT (só enumera o MFT e consulta o perfil DXVA na GPU);
+- `media_foundation::supports` + `mft::has_decoder` novos para isso.
+
+**Por quê.** O `filmcraft-platform` do upstream depende de `filmcraft-export`, `filmcraft-project`,
+`filmcraft-render` e do engine porque carrega três famílias de coisa: decoders, encoders de
+hardware e as probes de export (formatos/HDR). Um player só precisa do decoder de vídeo; puxar o
+resto é arrastar o editor. O recorte também deixa o SW pure-Rust como fundação explícita: o crate
+não depende de nada do app.
+
+**Estado atual (fork).** `register()` no Windows registra a factory de Media Foundation e liga o
+`set_hw_backend("Media Foundation")`; em qualquer outra plataforma devolve
+`Availability::Unavailable` e o decode fica 100% software. Promover Linux (VA-API/NVDEC) e macOS
+(VideoToolbox) é acrescentar o módulo `cfg` correspondente e o braço no `register()`, como no
+upstream.
+
+**Proposta de upstream (não submetida).** Extrair `crates/platform` em dois: `filmcraft-hwdec`
+(decode: VideoToolbox / Media Foundation / VA-API / NVDEC + `hybrid`) e `filmcraft-platform`
+(encode + probes de export), com `platform` dependendo de `hwdec`. Ganho para eles: apps/bench que
+só decodificam param de compilar project/render/export; o bench do `ui-egui` e o player usariam o
+mesmo crate. Enquanto isso, este fork mantém a cópia e anota cada ponto de mudança com
+`// fork local-player-rs:`.
+
+**Pendências herdadas do upstream.** O readback é GPU→CPU (staging texture) e o upload para a wgpu
+continua no app: zero-copy D3D11 → wgpu é bônus, não implementado.
+
 ## Fora do fork (nem divergência, nem patch)
 
 - **Prioridade da thread de decode.** O app baixa a prioridade da própria thread `video-decode`

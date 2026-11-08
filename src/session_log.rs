@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::metrics::TrackInfo;
+use crate::metrics::{HwMode, HwUsage, TrackInfo};
 
 /// Arquivos de log mantidos (um por execução).
 const KEEP: usize = 10;
@@ -66,6 +66,8 @@ struct State {
     last_rss_check: Instant,
     last_rss_log: Option<Instant>,
     rss_high: bool,
+    /// Modo de hwdec já registrado para a faixa (uma linha por modo).
+    hw_logged: Option<HwMode>,
 }
 
 /// Escritor do log de sessão (compartilhado por referência; só a UI escreve).
@@ -101,20 +103,50 @@ impl SessionLog {
     pub fn track(&self, path: &str, info: &TrackInfo) {
         let mut st = self.lock();
         close_stall(&mut st, "track_change");
+        // Cada faixa decide de novo: o modo de hwdec é registrado quando conhecido.
+        st.hw_logged = None;
         let video = match (&info.video_codec, info.width, info.height) {
             (Some(c), w, h) if w > 0 && h > 0 => format!("{c} {w}x{h} {:.3}fps", info.fps),
             (Some(c), _, _) => (*c).clone(),
             _ => "-".to_string(),
         };
         let bitrate = info.bitrate.map_or("-".to_string(), |b| format!("{:.2}Mb/s", b as f64 / 1e6));
+        let policy = if filmcraft_codecs::hw::hardware_decoding() { "on" } else { "off" };
+        let backend = filmcraft_codecs::hw::hw_backend().unwrap_or("-");
         let line = format!(
-            "track file=\"{}\" container={} video=\"{}\" audio={} bitrate={} dur={:.3}s",
+            "track file=\"{}\" container={} video=\"{}\" audio={} bitrate={} dur={:.3}s hwdec={} backend={}",
             escape(path),
             info.container,
             video,
             info.audio_codec.as_deref().unwrap_or("-"),
             bitrate,
-            info.duration
+            info.duration,
+            policy,
+            backend
+        );
+        write_line(&mut st, &line);
+    }
+
+    /// Decoder usado pela faixa (hardware vs SW), uma linha por modo. O hub
+    /// conta os quadros de hardware; quando o modo fica conhecido, isso entra no
+    /// log — inclusive a queda para o software no meio do stream.
+    pub fn hwdec(&self, usage: &HwUsage) {
+        if matches!(usage.mode, HwMode::Idle | HwMode::Pending) {
+            return;
+        }
+        let mut st = self.lock();
+        if st.hw_logged == Some(usage.mode) {
+            return;
+        }
+        st.hw_logged = Some(usage.mode);
+        let line = format!(
+            "event=hwdec mode={} backend={} frames={} sessions={} declined={} fallbacks={}",
+            usage.mode.label(),
+            usage.backend.unwrap_or("-"),
+            usage.frames,
+            usage.sessions,
+            usage.declined,
+            usage.fallbacks
         );
         write_line(&mut st, &line);
     }
@@ -216,7 +248,17 @@ impl SessionLog {
 
 impl State {
     fn new(dir: Option<PathBuf>) -> Self {
-        Self { dir, file: None, stall: None, last_drop: None, last_upload: None, last_rss_check: Instant::now(), last_rss_log: None, rss_high: false }
+        Self {
+            dir,
+            file: None,
+            stall: None,
+            last_drop: None,
+            last_upload: None,
+            last_rss_check: Instant::now(),
+            last_rss_log: None,
+            rss_high: false,
+            hw_logged: None,
+        }
     }
 
     fn disabled() -> Self {
@@ -445,5 +487,41 @@ mod tests {
         assert!(text.contains("drops=6"), "o burst entra no episódio: {text}");
         assert!(text.contains("event=drop_burst n=6 ring=3"), "{text}");
         assert!(text.contains("session end"), "{text}");
+    }
+
+    #[test]
+    fn hwdec_entra_no_log_uma_vez_por_modo() {
+        let dir = std::env::temp_dir().join(format!(
+            "lp-rs-log-hw-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        let log = SessionLog { state: Mutex::new(State::new(Some(dir.clone()))) };
+        let info = TrackInfo {
+            container: "matroska".into(),
+            video_codec: Some("H.264".into()),
+            width: 1920,
+            height: 1080,
+            fps: 24.0,
+            ..TrackInfo::default()
+        };
+        log.track("a.mkv", &info);
+        let hardware = HwUsage { mode: HwMode::Hardware, backend: Some("Media Foundation"), frames: 30, sessions: 1, declined: 0, fallbacks: 0 };
+        // O mesmo modo não repete a linha; a queda para o software entra.
+        log.hwdec(&hardware);
+        log.hwdec(&hardware);
+        log.hwdec(&HwUsage { mode: HwMode::HardwareThenSoftware, fallbacks: 1, ..hardware });
+        log.end();
+        let text = std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|mut d| d.next())
+            .and_then(|e| e.ok())
+            .and_then(|e| std::fs::read_to_string(e.path()).ok())
+            .unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(text.contains("hwdec=on"), "{text}");
+        assert_eq!(text.matches("event=hwdec").count(), 2, "{text}");
+        assert!(text.contains("mode=hardware backend=Media Foundation frames=30"), "{text}");
+        assert!(text.contains("mode=hardware → software"), "{text}");
     }
 }

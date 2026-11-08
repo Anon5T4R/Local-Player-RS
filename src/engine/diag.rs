@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use filmcraft_codecs::hw::HwStats;
 use filmcraft_media::FrameRequest;
 use filmcraft_time::Tick;
 
@@ -51,6 +52,8 @@ pub struct ProbeReport {
     pub bitrate: Option<u64>,
     pub video: Option<ProbeVideo>,
     pub audio: Vec<ProbeAudio>,
+    /// Hardware decoding para este stream: "provável (…)" ou "não (motivo)".
+    pub hwdec: String,
 }
 
 /// Lê os metadados de `path` pelo hub do FilmCraft (sem decodificar frames).
@@ -76,7 +79,22 @@ pub fn probe(path: &str) -> Result<ProbeReport, EngineError> {
         .iter()
         .map(|a| ProbeAudio { codec: a.codec.clone(), sample_rate: a.sample_rate, channels: a.channels, bits_per_sample: a.bits_per_sample })
         .collect();
-    Ok(ProbeReport { path: path.to_string(), container: info.container.clone(), duration, file_size: info.file_size, bitrate, video, audio })
+    let hwdec = match info.video.as_ref() {
+        Some(v) => hwdec_line(&v.codec, v.width, v.height, &v.pixel_format),
+        None => "n/a (sem vídeo)".into(),
+    };
+    Ok(ProbeReport { path: path.to_string(), container: info.container.clone(), duration, file_size: info.file_size, bitrate, video, audio, hwdec })
+}
+
+/// O que dá para afirmar sobre o hwdec antes de abrir um decoder: a família e o
+/// bit depth do stream, o MFT existir e a GPU listar o perfil DXVA. "Provável"
+/// de propósito: o perfil/tamanho exatos ainda têm a palavra final na abertura.
+fn hwdec_line(codec: &str, width: u32, height: u32, pixel_format: &str) -> String {
+    let p = filmcraft_hwdec::probe(codec, width, height, pixel_format);
+    match p.choice {
+        filmcraft_hwdec::Choice::Hardware => format!("provável ({})", p.reason),
+        filmcraft_hwdec::Choice::Software => format!("não ({})", p.reason),
+    }
 }
 
 /// Um trecho de 10 s de tempo de mídia no benchmark (revela "estabilizou
@@ -115,6 +133,10 @@ pub struct BenchReport {
     pub cache_mb: f64,
     pub rss_mb: f64,
     pub rss_peak_mb: f64,
+    /// Política em vigor: "on (Media Foundation)" / "off".
+    pub hwdec: String,
+    /// Decoder que realmente decodificou o trecho (MF vs SW), pelos contadores do hub.
+    pub decoder: String,
 }
 
 /// Decodifica `seconds` segundos (ou a faixa inteira, se `None`) o mais rápido
@@ -140,6 +162,7 @@ pub fn bench(path: &str, seconds: Option<f64>) -> Result<BenchReport, EngineErro
     let repeat_limit = (5.0 / step).ceil().max(1.0) as usize;
 
     let before = filmcraft_codecs::gop_stats();
+    let before_hw = filmcraft_codecs::hw::hw_stats();
     let started = Instant::now();
     let mut samples_us: Vec<u32> = Vec::with_capacity(frames.min(200_000));
     let mut buckets: Vec<BenchBucket> = Vec::new();
@@ -194,6 +217,8 @@ pub fn bench(path: &str, seconds: Option<f64>) -> Result<BenchReport, EngineErro
     }
     let after = filmcraft_codecs::gop_stats();
     let delta = after - before;
+    let hw = metrics::hw_delta(before_hw, filmcraft_codecs::hw::hw_stats());
+    let codec_label = info.video.as_ref().map_or("", |v| v.codec.as_str());
     let (rss_mb, rss_peak_mb) = metrics::rss_mb();
 
     let mean = if samples_us.is_empty() { 0.0 } else { samples_us.iter().map(|v| f64::from(*v)).sum::<f64>() / samples_us.len() as f64 / 1e3 };
@@ -224,7 +249,42 @@ pub fn bench(path: &str, seconds: Option<f64>) -> Result<BenchReport, EngineErro
         cache_mb: filmcraft_codecs::cached_bytes() as f64 / (1024.0 * 1024.0),
         rss_mb,
         rss_peak_mb,
+        hwdec: hwdec_policy_label(),
+        decoder: decoder_label(&hw, codec_label),
     })
+}
+
+/// A política de hwdec em vigor para o `--bench`.
+fn hwdec_policy_label() -> String {
+    if !filmcraft_codecs::hw::hardware_decoding() {
+        return "off".into();
+    }
+    match filmcraft_codecs::hw::hw_backend() {
+        Some(backend) => format!("on ({backend})"),
+        None => "on (no backend registered)".into(),
+    }
+}
+
+/// Qual decoder decodificou o trecho, pelos contadores do hub: quadros de
+/// hardware, recusas da factory e quedas no meio do stream.
+fn decoder_label(hw: &HwStats, codec: &str) -> String {
+    let backend = filmcraft_codecs::hw::hw_backend().unwrap_or("hardware");
+    if !filmcraft_codecs::hw::hardware_decoding() {
+        return "software (hardware decoding off)".into();
+    }
+    if hw.fallbacks > 0 {
+        return format!("{backend} → software (fell back mid-stream)");
+    }
+    if hw.frames > 0 {
+        return format!("{backend} (hardware)");
+    }
+    if hw.declined > 0 {
+        return "software (the hardware decoder declined this stream)".into();
+    }
+    if filmcraft_hwdec::codec::family(codec).is_none() {
+        return "software (no hardware path for this codec)".into();
+    }
+    "software".into()
 }
 
 /// p95 (ou outro quantil) de amostras em µs → ms.

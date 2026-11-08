@@ -23,16 +23,24 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       ASS básico (styles, cores, \an, contorno/caixa; sem \pos/\fad/karaokê — ver
       limitações em src/subtitle/ass.rs), mouse esconde junto com os controles,
       overlay tabular com pos/dura, letterbox borda-a-borda (tolerância 1%).
-- [ ] **7. hwdec primeira opção** — Windows (Media Foundation + DXVA) → Linux
-      (VA-API/NVDEC) → macOS (VideoToolbox), fallback SW pure-Rust transparente.
-      Caminho: desacoplar `filmcraft-platform` do snapshot das deps do editor.
+- [x] **7a. hwdec no Windows** — Media Foundation + DXVA como **primeira opção**,
+      extraído do `filmcraft-platform` para o crate `filmcraft-hwdec` (sem as deps do
+      editor: project/render/export/encoders), com fallback SW pure-Rust transparente
+      (`HybridDecoder`). Overlay D e log de sessão mostram o decoder usado; `--probe` diz
+      "provável"; `--bench --hw off` mede o baseline. MKV 1080p H.264 (Ado): MF
+      **448 fps / 2,23 ms / p95 4,9 ms** vs SW **354 fps / 2,83 ms / p95 15,0 ms** (~27%
+      mais vazão, p95 3x menor). O readback GPU→CPU é o teto; zero-copy D3D11→wgpu é
+      pendência.
+- [ ] **7b. hwdec Linux/macOS** — VA-API/NVDEC e VideoToolbox no mesmo crate
+      (`register()` por plataforma); SW puro até lá.
 - [ ] **8. Maturação** — legenda embutida no MKV (requer exposição de faixa no hub),
       tonemap HDR, VFR, extração do motor como crate, contribuição dos patches
       upstream (`docs/upstream/`).
 
 ## Pendências conhecidas
 
-- **hwdec** Media Foundation — 4K HEVC em software pode não segurar sozinho.
+- **hwdec 4K HEVC** — MF/DXVA cobre Main/Main 10 e VP9/AV1; falta validar 4K HEVC real em
+  hardware (o SW pode não segurar sozinho, e o readback GPU→CPU cresce com a resolução).
 - **HDR → SDR tonemap** — vídeo HDR sai sem conversão (cores lavadas).
 - **VFR** — o pipeline assume a taxa nominal declarada pelo container.
 - **ASS** — básico (styles/cores/\an/contorno); `\pos`/`\move`/`\fad`/karaokê/`\t`/desenho

@@ -24,13 +24,32 @@ pub enum Command {
     Bench {
         path: String,
         seconds: Option<f64>,
+        hw: HwPolicy,
     },
+}
+
+/// Media Foundation (ou o backend da plataforma) na frente dos decoders SW, ou
+/// só os pure-Rust — o `--bench` roda os dois para comparar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwPolicy {
+    Auto,
+    Off,
+}
+
+impl HwPolicy {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "auto" | "on" => Ok(Self::Auto),
+            "off" => Ok(Self::Off),
+            other => Err(format!("--hw inválido: {other} (auto|off)")),
+        }
+    }
 }
 
 /// Interpreta os args (sem o nome do programa). `Err` = uso incorreto.
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut probe: Option<String> = None;
-    let mut bench: Option<(String, Option<f64>)> = None;
+    let mut bench: Option<(String, Option<f64>, HwPolicy)> = None;
     let mut help = false;
     let mut version = false;
     let mut i = 0;
@@ -45,7 +64,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             "--bench" => {
                 let path = args.get(i + 1).ok_or("--bench precisa de um arquivo")?;
-                bench = Some((path.clone(), None));
+                bench = Some((path.clone(), None, HwPolicy::Auto));
                 i += 1;
             }
             "--seconds" => {
@@ -55,8 +74,17 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     return Err(format!("--seconds precisa ser > 0 (recebido {raw})"));
                 }
                 match bench.as_mut() {
-                    Some((_, slot)) => *slot = Some(secs),
+                    Some((_, slot, _)) => *slot = Some(secs),
                     None => return Err("--seconds só vale com --bench".into()),
+                }
+                i += 1;
+            }
+            "--hw" => {
+                let raw = args.get(i + 1).ok_or("--hw precisa de auto ou off")?;
+                let policy = HwPolicy::parse(raw)?;
+                match bench.as_mut() {
+                    Some((_, _, slot)) => *slot = policy,
+                    None => return Err("--hw só vale com --bench".into()),
                 }
                 i += 1;
             }
@@ -74,7 +102,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     match (probe, bench) {
         (Some(_), Some(_)) => Err("use --probe ou --bench, não os dois".into()),
         (Some(path), None) => Ok(Command::Probe(path)),
-        (None, Some((path, seconds))) => Ok(Command::Bench { path, seconds }),
+        (None, Some((path, seconds, hw))) => Ok(Command::Bench { path, seconds, hw }),
         (None, None) => Ok(Command::Run),
     }
 }
@@ -116,8 +144,11 @@ pub fn run(args: &[String]) -> Option<i32> {
                 }
             }
         }
-        Command::Bench { path, seconds } => {
+        Command::Bench { path, seconds, hw } => {
             let mut out = output();
+            // Política do hwdec: `auto` deixa o decoder do SO na frente dos SW;
+            // `off` mede o baseline pure-Rust no mesmo binário.
+            filmcraft_codecs::hw::set_hardware_decoding(hw != HwPolicy::Off);
             match engine::bench(&path, seconds) {
                 Ok(report) => {
                     let _ = print_bench(&mut out, &report);
@@ -140,7 +171,8 @@ fn print_help(out: &mut dyn Write) {
          USO:\n\
          \x20 local-player-rs [arquivo...]                  abre a janela\n\
          \x20 local-player-rs --probe <arquivo>              metadados do container e sai\n\
-         \x20 local-player-rs --bench <arquivo> [--seconds N]  decode puro (sem UI/áudio/GPU)\n\
+         \x20 local-player-rs --bench <arquivo> [--seconds N] [--hw auto|off]\n\
+         \x20                                                decode puro (sem UI/áudio/GPU)\n\
          \x20 local-player-rs --version | --help\n\
          \n\
          DIAGNÓSTICO EM TEMPO REAL:\n\
@@ -193,6 +225,7 @@ fn print_probe(out: &mut dyn Write, r: &engine::ProbeReport) -> std::io::Result<
         }
         None => writeln!(out, "video      (nenhum)")?,
     }
+    writeln!(out, "hwdec      {}", r.hwdec)?;
     if r.audio.is_empty() {
         writeln!(out, "audio      (nenhum)")?;
     }
@@ -206,6 +239,8 @@ fn print_probe(out: &mut dyn Write, r: &engine::ProbeReport) -> std::io::Result<
 fn print_bench(out: &mut dyn Write, r: &engine::BenchReport) -> std::io::Result<()> {
     writeln!(out, "file       {}", r.path)?;
     writeln!(out, "stream     {} {}x{} {:.3} fps", r.codec, r.width, r.height, r.fps)?;
+    writeln!(out, "hwdec      {}", r.hwdec)?;
+    writeln!(out, "decoder    {}", r.decoder)?;
     writeln!(out, "decoded    {} frames ({:.2} s de mídia) em {:.3} s de parede", r.frames, r.media_secs, r.wall_secs)?;
     writeln!(out, "decode     {:.1} fps  mean {:.2} ms  p95 {:.2} ms  max {:.2} ms", r.decode_fps, r.mean_ms, r.p95_ms, r.max_ms)?;
     if !r.buckets.is_empty() {
@@ -268,8 +303,22 @@ mod tests {
 
     #[test]
     fn bench_com_segundos() {
-        assert_eq!(parse(&args(&["--bench", "a.mkv", "--seconds", "12.5"])), Ok(Command::Bench { path: "a.mkv".into(), seconds: Some(12.5) }));
-        assert_eq!(parse(&args(&["--bench", "a.mkv"])), Ok(Command::Bench { path: "a.mkv".into(), seconds: None }));
+        assert_eq!(
+            parse(&args(&["--bench", "a.mkv", "--seconds", "12.5"])),
+            Ok(Command::Bench { path: "a.mkv".into(), seconds: Some(12.5), hw: HwPolicy::Auto })
+        );
+        assert_eq!(parse(&args(&["--bench", "a.mkv"])), Ok(Command::Bench { path: "a.mkv".into(), seconds: None, hw: HwPolicy::Auto }));
+    }
+
+    #[test]
+    fn bench_pode_forcar_software() {
+        assert_eq!(parse(&args(&["--bench", "a.mkv", "--hw", "off"])), Ok(Command::Bench { path: "a.mkv".into(), seconds: None, hw: HwPolicy::Off }));
+        assert_eq!(
+            parse(&args(&["--bench", "a.mkv", "--hw", "auto"])),
+            Ok(Command::Bench { path: "a.mkv".into(), seconds: None, hw: HwPolicy::Auto })
+        );
+        assert_eq!(HwPolicy::parse("on"), Ok(HwPolicy::Auto));
+        assert!(HwPolicy::parse("hardware").is_err());
     }
 
     #[test]
@@ -285,6 +334,8 @@ mod tests {
         assert!(parse(&args(&["--seconds", "3"])).is_err());
         assert!(parse(&args(&["--bench", "a.mkv", "--seconds", "0"])).is_err());
         assert!(parse(&args(&["--bench", "a.mkv", "--seconds", "abc"])).is_err());
+        assert!(parse(&args(&["--bench", "a.mkv", "--hw", "nope"])).is_err());
+        assert!(parse(&args(&["--hw", "off"])).is_err(), "--hw só vale com --bench");
         assert!(parse(&args(&["--nope"])).is_err());
     }
 
