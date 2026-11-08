@@ -31,8 +31,6 @@ pub enum EngineError {
     Open(String),
     #[error("decoding failed: {0}")]
     Decode(String),
-    #[error("this file does not support seeking")]
-    Seek,
     #[error("media dimensions are too large: {0}")]
     TooLarge(String),
     #[error("the audio engine stopped: {0}")]
@@ -45,7 +43,6 @@ impl EngineError {
             Self::NoDevice(_) => ErrorKind::NoDevice,
             Self::Open(_) => ErrorKind::Open,
             Self::Decode(_) => ErrorKind::Decode,
-            Self::Seek => ErrorKind::Seek,
             Self::TooLarge(_) => ErrorKind::TooLarge,
             Self::EngineStopped(_) => ErrorKind::Engine,
         }
@@ -74,7 +71,7 @@ mod tests {
         let e = EngineError::Open("unsupported codec".into());
         assert_eq!(e.kind(), ErrorKind::Open);
         assert_eq!(e.to_string(), "could not open the file: unsupported codec");
-        assert_eq!(EngineError::Seek.kind(), ErrorKind::Seek);
+        assert_eq!(ErrorKind::Seek.to_string(), "seek");
         assert_eq!(EngineError::TooLarge("16384×16384".into()).kind(), ErrorKind::TooLarge);
         assert_eq!(EngineError::EngineStopped("thread ended".into()).kind(), ErrorKind::Engine);
     }

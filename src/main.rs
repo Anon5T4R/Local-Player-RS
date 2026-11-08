@@ -541,15 +541,26 @@ impl PlayerApp {
                 }
             }
             engine::Event::TrackEnded => self.on_track_ended(),
+            engine::Event::SeekFailed { position } => {
+                // Busca recusada: a faixa segue tocando no ponto restaurado.
+                // Nada de `on_track_ended` aqui (o bug do MP3 que pulava).
+                self.position = position;
+                if let Some(v) = self.video.as_mut() {
+                    v.seek(position);
+                }
+                self.video_frames.clear();
+                self.last_video_pts = position;
+                self.status = self.error_text(engine::ErrorKind::Seek).to_owned();
+                self.status_warn = true;
+            }
             engine::Event::Error(e) => {
                 // Thread do motor morta = anomalia no log automático.
                 if e.kind() == engine::ErrorKind::Engine {
                     self.session.engine_dead(&e.to_string());
                 }
-                // Seek falho não conta para o "pula a playlist" (a faixa toca).
-                if e.kind() != engine::ErrorKind::Seek {
-                    self.error_streak += 1;
-                }
+                // Busca recusada não passa por aqui: vem como `SeekFailed` e
+                // não conta para o "pula a playlist" (a faixa continua).
+                self.error_streak += 1;
                 self.status = self.error_text(e.kind()).to_owned();
                 self.status_warn = true;
                 eprintln!("engine: {e}");

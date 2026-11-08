@@ -25,8 +25,8 @@
 //!   não conhece a playlist). Vídeo mudo: a UI trata o `End` do pipeline.
 //!
 //! Limitações documentadas: legendas ficam para a fase 4; RGBA (Motion JPEG)
-//! não é renderizado na fase 3; seek em formato que não suporta vira
-//! [`ErrorKind::Seek`] sem derrubar nada.
+//! não é renderizado na fase 3; seek que falha vira [`Event::SeekFailed`]
+//! (aviso não-fatal) e a faixa continua — nunca vira fim de faixa.
 
 mod decoder;
 mod diag;
@@ -134,6 +134,9 @@ pub enum Event {
     TrackEnded,
     /// Falha — a UI mostra a mensagem i18n correspondente ao [`ErrorKind`].
     Error(EngineError),
+    /// Busca recusada (alvo além do fim etc.): **não** é fim de faixa. A
+    /// faixa continua tocando em `position`; a UI mostra um aviso.
+    SeekFailed { position: f64 },
     /// O container tem vídeo: a UI passa a dirigir o pipeline (frame por PTS).
     VideoOpened(VideoPipeline),
 }
@@ -282,6 +285,7 @@ impl PlayerEngine {
                             self.position = 0.0;
                         }
                         Event::Error(_) | Event::VideoOpened(_) => {}
+                        Event::SeekFailed { position } => self.position = *position,
                     }
                     out.push(ev);
                 }
@@ -341,20 +345,23 @@ impl AudioPart {
         Self { source, resampler }
     }
 
-    fn seek(&mut self, secs: f64) -> Result<(), EngineError> {
-        match catch_unwind(AssertUnwindSafe(|| self.source.seek(secs))) {
-            Ok(Ok(())) => {
-                if let Some(r) = &mut self.resampler {
-                    r.reset();
-                }
-                Ok(())
+    fn seek(&mut self, secs: f64) -> decoder::Seeked {
+        let outcome = match catch_unwind(AssertUnwindSafe(|| self.source.seek(secs))) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                // Pânico dentro do seek: pior caso, volta ao começo.
+                let position = match catch_unwind(AssertUnwindSafe(|| self.source.seek(0.0))) {
+                    Ok(outcome) => outcome.position,
+                    Err(_) => 0.0,
+                };
+                decoder::Seeked { position, warning: Some("decoder panicked while seeking".into()) }
             }
-            Ok(Err(detail)) => {
-                eprintln!("engine: seek falhou: {detail}");
-                Err(EngineError::Seek)
-            }
-            Err(_) => Err(EngineError::Seek),
+        };
+        // Qualquer reposicionamento invalida a interpolação do resampler.
+        if let Some(r) = &mut self.resampler {
+            r.reset();
         }
+        outcome
     }
 }
 
@@ -366,11 +373,11 @@ struct Track {
 }
 
 impl Track {
-    fn seek(&mut self, secs: f64) -> Result<(), EngineError> {
+    fn seek(&mut self, secs: f64) -> decoder::Seeked {
         match self.audio.as_mut() {
             Some(a) => a.seek(secs),
             // Vídeo mudo: o seek é do pipeline (UI) + relógio de parede.
-            None => Ok(()),
+            None => decoder::Seeked { position: if secs.is_finite() { secs.max(0.0) } else { 0.0 }, warning: None },
         }
     }
 }
@@ -526,6 +533,7 @@ fn stop_track(st: &mut EngineState, clock: &Clock) {
 fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Arc<Clock>, metrics: &Arc<Metrics>) {
     match cmd {
         Cmd::Play { path, start_at } => {
+            let mut start_at = start_at;
             // Troca de faixa: descarta a anterior e o buffer velho.
             st.track = None;
             st.pending.reset();
@@ -573,14 +581,17 @@ fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Ar
                 let _ = tx.send(Event::VideoOpened(p));
             }
             let mut duration = duration;
+            let mut seek_warning: Option<String> = None;
             let audio = match audio {
                 Some(source) => {
                     let mut part = AudioPart::new(source, rate);
                     if start_at > 0.0 {
-                        if let Err(e) = part.seek(start_at) {
-                            fail_play(st, clock, tx, e);
-                            return;
-                        }
+                        // Retomada em ponto salvo: se o alvo não existir mais
+                        // (arquivo trocado/cortado), toca do último ponto bom
+                        // e avisa — abrir nunca pode pular a faixa.
+                        let outcome = part.seek(start_at);
+                        start_at = outcome.position;
+                        seek_warning = outcome.warning;
                     }
                     duration = duration.or_else(|| part.source.duration());
                     Some(part)
@@ -599,6 +610,10 @@ fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Ar
             st.transport = Transport::Playing;
             let _ = tx.send(Event::DurationKnown(duration.unwrap_or(0.0)));
             let _ = tx.send(Event::State(st.transport));
+            if let Some(detail) = seek_warning {
+                eprintln!("engine: seek inicial recusado: {detail} (começando em {start_at:.3}s)");
+                let _ = tx.send(Event::SeekFailed { position: start_at });
+            }
         }
         Cmd::Pause => {
             if st.track.is_some() {
@@ -625,19 +640,21 @@ fn handle_command(cmd: Cmd, st: &mut EngineState, tx: &Sender<Event>, clock: &Ar
             let _ = tx.send(Event::State(st.transport));
         }
         Cmd::Seek(secs) => {
-            st.wall.seek(secs);
-            if let Some(t) = st.track.as_mut() {
-                match t.seek(secs) {
-                    Ok(()) => {
-                        st.pending.reset();
-                        if let Some(s) = st.session.as_ref() {
-                            s.ring.flush(secs_to_frames(secs, s.rate));
-                        }
+            let outcome = st.track.as_mut().map(|t| t.seek(secs));
+            match outcome {
+                Some(outcome) => {
+                    st.wall.seek(outcome.position);
+                    st.pending.reset();
+                    if let Some(s) = st.session.as_ref() {
+                        s.ring.flush(secs_to_frames(outcome.position, s.rate));
                     }
-                    Err(e) => {
-                        let _ = tx.send(Event::Error(e));
+                    if let Some(detail) = outcome.warning {
+                        eprintln!("engine: seek para {secs:.3}s recusado: {detail} (faixa segue em {:.3}s)", outcome.position);
+                        // Aviso não-fatal: a playlist NÃO anda e a faixa continua.
+                        let _ = tx.send(Event::SeekFailed { position: outcome.position });
                     }
                 }
+                None => st.wall.seek(secs),
             }
         }
         Cmd::Volume(gain) => {
@@ -719,4 +736,72 @@ fn fill_pending(track: &mut Track, pending: &mut Pending, chunk: decoder::Chunk,
     let Some(part) = track.audio.as_mut() else { return };
     let rs = part.resampler.get_or_insert_with(|| LinearResampler::new(chunk.rate, device_rate));
     rs.process(&stereo, &mut pending.data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fonte que recusa alvos além de 10 s e informa a posição restaurada.
+    struct FakeSource;
+
+    impl decoder::AudioSource for FakeSource {
+        fn next_chunk(&mut self) -> Result<Option<decoder::Chunk>, String> {
+            Ok(None)
+        }
+
+        fn seek(&mut self, secs: f64) -> decoder::Seeked {
+            if secs > 10.0 {
+                decoder::Seeked { position: 3.0, warning: Some("alvo fora do arquivo".into()) }
+            } else {
+                decoder::Seeked { position: secs, warning: None }
+            }
+        }
+
+        fn duration(&self) -> Option<f64> {
+            Some(10.0)
+        }
+
+        fn sample_rate(&self) -> u32 {
+            44_100
+        }
+    }
+
+    fn state_with_fake_track() -> EngineState {
+        EngineState {
+            session: None,
+            track: Some(Track {
+                path: "faixa.mp3".into(),
+                duration: Some(10.0),
+                audio: Some(AudioPart { source: Box::new(FakeSource), resampler: None }),
+            }),
+            pending: Pending::default(),
+            transport: Transport::Playing,
+            wall: WallClock::playing(0.0),
+            last_hint: Instant::now(),
+        }
+    }
+
+    /// Regressão do MP3 que pulava faixa: um seek recusado vira
+    /// `SeekFailed` (aviso) e **nunca** `TrackEnded`; o relógio volta para a
+    /// posição restaurada.
+    #[test]
+    fn seek_recusado_vira_aviso_e_nao_fim_de_faixa() {
+        let (tx, rx) = channel();
+        let clock = Arc::new(Clock::default());
+        let metrics = Arc::new(Metrics::new());
+        let mut st = state_with_fake_track();
+
+        handle_command(Cmd::Seek(1.0e12), &mut st, &tx, &clock, &metrics);
+        drop(tx);
+
+        let events: Vec<Event> = rx.try_iter().collect();
+        let warned = events.iter().any(|ev| matches!(ev, Event::SeekFailed { position } if (*position - 3.0).abs() < 1e-9));
+        let ended = events.iter().any(|ev| matches!(ev, Event::TrackEnded));
+        let failed = events.iter().any(|ev| matches!(ev, Event::Error(_)));
+        assert!(warned, "seek recusado não gerou SeekFailed");
+        assert!(!ended, "seek recusado gerou TrackEnded (pula a playlist)");
+        assert!(!failed, "seek recusado virou erro fatal");
+        assert!((st.wall.position() - 3.0).abs() < 0.1, "relógio não voltou: {}", st.wall.position());
+    }
 }

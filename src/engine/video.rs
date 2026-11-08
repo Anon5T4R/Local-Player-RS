@@ -29,7 +29,7 @@ use filmcraft_time::Tick;
 use crate::metrics::Metrics;
 use crate::video::Frame;
 
-use super::decoder::{AudioSource, Chunk};
+use super::decoder::{AudioSource, Chunk, Seeked};
 use super::error::EngineError;
 use super::Clock;
 
@@ -155,11 +155,12 @@ impl AudioSource for MediaAudio {
         Ok(Some(Chunk { rate: self.rate, channels, samples }))
     }
 
-    fn seek(&mut self, secs: f64) -> Result<(), String> {
+    fn seek(&mut self, secs: f64) -> Seeked {
         let s = if secs.is_finite() { secs.max(0.0) } else { 0.0 };
         let frame = (s * f64::from(self.rate)).round();
         self.pos = (frame as i64).clamp(0, self.total);
-        Ok(())
+        let position = if self.rate == 0 { 0.0 } else { self.pos as f64 / f64::from(self.rate) };
+        Seeked { position, warning: None }
     }
 
     fn duration(&self) -> Option<f64> {
