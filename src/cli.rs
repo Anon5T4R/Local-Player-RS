@@ -233,6 +233,14 @@ fn print_probe(out: &mut dyn Write, r: &engine::ProbeReport) -> std::io::Result<
         let bits = a.bits_per_sample.map_or(String::new(), |b| format!(" {b} bits"));
         writeln!(out, "audio #{}   {} {} Hz {} ch{}", i + 1, a.codec, a.sample_rate, a.channels, bits)?;
     }
+    if r.subtitles.is_empty() {
+        writeln!(out, "subtitles  (nenhuma)")?;
+    }
+    for (i, s) in r.subtitles.iter().enumerate() {
+        let support = if s.supported { "" } else { "  (não suportada pelo player)" };
+        let name = if s.name.is_empty() { String::new() } else { format!("  \"{}\"", s.name) };
+        writeln!(out, "subtitles #{} {} {}{support}{name}", i + 1, s.language, s.codec)?;
+    }
     Ok(())
 }
 

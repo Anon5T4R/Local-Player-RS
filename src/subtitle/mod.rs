@@ -1,10 +1,16 @@
-//! Legendas externas: SRT, WebVTT (com cue settings) e ASS/SSA (estilo básico).
+//! Legendas: arquivo externo (SRT, WebVTT, ASS/SSA) e faixa embutida no
+//! container (SubRip/WebVTT/ASS do Matroska e `tx3g`/`mov_text` do MP4).
 //!
-//! O arquivo é procurado ao lado do vídeo com o mesmo nome-base (`filme.srt`,
-//! `filme.pt-br.ass`, `filme.en.vtt`, ...) — a lista de candidatos e a ordem de
-//! preferência ficam em [`candidates`]. O parser de cada formato é tolerante:
-//! BOM UTF-8/UTF-16, CRLF/CR solto, marcação desconhecida e entradas quebradas
-//! (puladas, nunca abortam o arquivo).
+//! O arquivo externo é procurado ao lado do vídeo com o mesmo nome-base
+//! (`filme.srt`, `filme.pt-br.ass`, `filme.en.vtt`, ...) - a lista de candidatos
+//! e a ordem de preferência ficam em [`candidates`]. O parser de cada formato é
+//! tolerante: BOM UTF-8/UTF-16, CRLF/CR solto, marcação desconhecida e entradas
+//! quebradas (puladas, nunca abortam o arquivo).
+//!
+//! A legenda **embutida** vem do fork do FilmCraft ([`embedded`]): o container
+//! entrega as amostras com início/fim em segundos e o payload cru; o app
+//! interpreta por formato (SRT/VTT sintéticos, script ASS reconstruído do
+//! `CodecPrivate`, ou [`tx3g`]). Externa vence embutida quando as duas existem.
 //!
 //! A seleção é pelo relógio do motor: quem chama passa o tempo de mídia e
 //! recebe a cue ativa ([`Subtitles::cue_at`]). Posição/tamanho da legenda sobre
@@ -12,14 +18,19 @@
 //! (fonte, cores, alinhamento, margens) já sai resolvido dos parsers.
 //!
 //! Limitações do ASS (posicionamento absoluto, karaokê, desenho, `\t`...) estão
-//! documentadas em [`ass`].
+//! documentadas em [`ass`]; as do `tx3g` (estilo por trecho, caixa, karaokê) em
+//! [`tx3g`].
 
 mod ass;
+mod embedded;
 mod layout;
 mod srt;
+mod tx3g;
 
 use std::path::{Path, PathBuf};
 
+pub use embedded::{choose_source, load as load_embedded, preferred_language, Embedded, Source};
+pub use filmcraft_codecs::subtitles::SubtitleSample as EmbeddedSample;
 pub use layout::{place, Margins};
 
 /// Alinhamento horizontal da cue dentro da área do vídeo.

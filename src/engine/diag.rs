@@ -41,6 +41,16 @@ pub struct ProbeAudio {
     pub bits_per_sample: Option<u32>,
 }
 
+/// Metadados de uma faixa de legenda embutida no container.
+#[derive(Clone, Debug)]
+pub struct ProbeSubtitle {
+    pub language: String,
+    pub codec: String,
+    pub name: String,
+    /// O player interpreta as amostras deste codec.
+    pub supported: bool,
+}
+
 /// O que o `--probe` imprime.
 #[derive(Clone, Debug)]
 pub struct ProbeReport {
@@ -52,6 +62,8 @@ pub struct ProbeReport {
     pub bitrate: Option<u64>,
     pub video: Option<ProbeVideo>,
     pub audio: Vec<ProbeAudio>,
+    /// Faixas de legenda embutidas (idioma, codec, nome).
+    pub subtitles: Vec<ProbeSubtitle>,
     /// Hardware decoding para este stream: "provável (…)" ou "não (motivo)".
     pub hwdec: String,
 }
@@ -83,7 +95,28 @@ pub fn probe(path: &str) -> Result<ProbeReport, EngineError> {
         Some(v) => hwdec_line(&v.codec, v.width, v.height, &v.pixel_format),
         None => "n/a (sem vídeo)".into(),
     };
-    Ok(ProbeReport { path: path.to_string(), container: info.container.clone(), duration, file_size: info.file_size, bitrate, video, audio, hwdec })
+    // Legendas embutidas: um chip próprio (o hub não as põe no MediaInfo).
+    let subtitles = match video::subtitle_tracks(path) {
+        Ok(tracks) => tracks
+            .into_iter()
+            .map(|t| ProbeSubtitle { language: t.language, codec: t.codec.name().to_owned(), name: t.name, supported: t.codec.is_supported() })
+            .collect(),
+        Err(e) => {
+            eprintln!("probe: legendas: {e}");
+            Vec::new()
+        }
+    };
+    Ok(ProbeReport {
+        path: path.to_string(),
+        container: info.container.clone(),
+        duration,
+        file_size: info.file_size,
+        bitrate,
+        video,
+        audio,
+        subtitles,
+        hwdec,
+    })
 }
 
 /// O que dá para afirmar sobre o hwdec antes de abrir um decoder: a família e o

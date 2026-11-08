@@ -236,6 +236,9 @@ impl Mp4Source {
     pub fn open_reader(name: &str, reader: filmcraft_media::SharedReader) -> crate::Result<Self> {
         let bytes = crate::Src(reader);
         let mut file = filmcraft_isobmff::open(&bytes).map_err(|e| CodecError::Container(e.to_string()))?;
+        // fork local-player-rs: corte por stream copy (`ffmpeg -ss … -c copy`)
+        // deixa um *empty edit* do trecho descartado; ver a função.
+        ignore_leading_empty_edits(&mut file);
         // A track needs samples, a sample description and a timescale to be playable (damaged
         // files can lack them: indexing `entries[0]` or dividing by the timescale used to panic).
         let playable = |t: &&filmcraft_isobmff::Track, kind| t.kind == kind && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0;
@@ -837,11 +840,61 @@ fn presentation_duration(file: &Mp4File, t: &filmcraft_isobmff::Track) -> Tick {
     if file.fragmented || t.edits.is_empty() || file.timescale == 0 {
         return media;
     }
-    let edits = t.edits.iter().fold(0u128, |a, e| a.saturating_add(e.segment_duration as u128));
+    // fork local-player-rs: o empty edit de corte (> 1 s) é descartado por
+    // `ignore_leading_empty_edits`; a duração é a soma dos edits que realmente
+    // tocam (mídia), não a duração original herdada do corte. Um vazio curto
+    // (atraso de reordenação) continua contando, como no upstream.
+    let drop_empty = leading_cut_lead_in(t, file.timescale).is_some();
+    let edits = t.edits.iter().filter(|e| !(drop_empty && e.media_time == -1)).fold(0u128, |a, e| a.saturating_add(e.segment_duration as u128));
     let ticks = edits.saturating_mul(filmcraft_time::TICKS_PER_SECOND as u128) / file.timescale as u128;
     match i64::try_from(ticks) {
         Ok(t) if t > 0 => Tick(t),
         _ => media,
+    }
+}
+
+/// fork local-player-rs: descarta o *empty edit* inicial que um corte por stream
+/// copy deixa no `elst` (`media_time = -1`).
+///
+/// `ffmpeg -ss … -t … -c copy` grava no `elst` o intervalo descartado como um
+/// edit vazio e mantém `mvhd`/a soma dos edits com a duração ORIGINAL, enquanto
+/// os samples de mídia continuam começando em zero. O demux (craft-media) aplica
+/// esse vazio no `edit_offset`: a posição 0 cai no primeiro sample, então o
+/// vídeo fica **congelado no primeiro frame** durante todo o vazio (o áudio
+/// segue em paralelo) e a barra de seek mostra a duração antiga. Tocar o conteúdo
+/// que o arquivo tem (como o mpv faz ao tratar o corte) significa começar no
+/// primeiro sample apresentado: o vazio é subtraído do offset e de
+/// [`presentation_duration`].
+///
+/// Só o vazio **longo** (> [`CUT_LEAD_IN_SECS`]) é tratado como artefato de
+/// corte: o empty edit de um frame que alguns encoders escrevem para o atraso de
+/// reordenação continua valendo (é o que o upstream testa). Edit lists normais
+/// (`media_time`, priming) ficam intocadas.
+const CUT_LEAD_IN_SECS: f64 = 1.0;
+
+/// Vazio inicial em ticks da faixa quando ele é longo o bastante para ser um
+/// corte por stream copy (`None`: vazio curto ou inexistente).
+fn leading_cut_lead_in(t: &filmcraft_isobmff::Track, movie_ts: u32) -> Option<i64> {
+    if movie_ts == 0 || t.timescale == 0 {
+        return None;
+    }
+    let empty: u128 = t.edits.iter().filter(|e| e.media_time == -1).map(|e| e.segment_duration as u128).sum();
+    if empty == 0 {
+        return None;
+    }
+    let ticks = empty * u128::from(t.timescale) / u128::from(movie_ts);
+    let secs = ticks as f64 / f64::from(t.timescale);
+    (secs > CUT_LEAD_IN_SECS).then(|| ticks.min(i64::MAX as u128) as i64)
+}
+
+fn ignore_leading_empty_edits(file: &mut Mp4File) {
+    if file.timescale == 0 {
+        return;
+    }
+    for t in &mut file.tracks {
+        if let Some(ticks) = leading_cut_lead_in(t, file.timescale) {
+            t.edit_offset = t.edit_offset.saturating_sub(ticks);
+        }
     }
 }
 
@@ -1378,6 +1431,37 @@ mod he_aac_tests {
             let buf = src.audio(0, 4800, 48_000).unwrap();
             assert!(buf.channels.iter().flatten().all(|v| v.is_finite() && v.abs() <= 1.0), "media_time {media_time}");
         }
+    }
+    /// fork local-player-rs: `ffmpeg -ss … -c copy` deixa um empty edit do
+    /// trecho descartado no `elst`. O player tem de tocar o conteúdo desde o
+    /// primeiro sample (sem duração herdada) em vez de ficar no silêncio/frame
+    /// congelado do vazio.
+    #[test]
+    fn leading_empty_edit_does_not_freeze_the_clip() {
+        use filmcraft_isobmff::Edit;
+        let rate = 44_100u32;
+        let tone: Vec<f32> = (0..rate as usize).map(|i| 0.25 * (i as f32 * 0.05).sin()).collect();
+        let mut enc = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(rate, 1, 64_000)).unwrap();
+        let mut aus = enc.encode(&[&tone]);
+        aus.extend(enc.flush());
+        let asc = vec![0x12, 0x08];
+        let mut mux = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).unwrap();
+        let mut cfg = TrackConfig::new(SampleEntry::aac(asc, 1, rate), rate);
+        // Corte por stream copy: 2 s de vazio (movie timescale 1000) + a mídia.
+        cfg.edits = vec![
+            Edit { segment_duration: 2_000, media_time: -1, media_rate: 0x10000 },
+            Edit { segment_duration: 1_000, media_time: 0, media_rate: 0x10000 },
+        ];
+        let t = mux.add_track(cfg).unwrap();
+        for au in &aus {
+            mux.write_sample(t, WriteSample { data: au, duration: 1024, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        let src = super::Mp4Source::open("cut.mp4", mux.finish().unwrap().into_inner().into()).unwrap();
+        let secs = src.info().duration.seconds();
+        assert!((0.9..1.2).contains(&secs), "duração herdada do corte: {secs}");
+        let buf = src.audio(0, 4410, 44_100).unwrap();
+        let peak = buf.channels[0].iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.05, "o vazio inicial não pode virar silêncio no começo (peak {peak})");
     }
 }
 

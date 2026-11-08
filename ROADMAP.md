@@ -33,9 +33,18 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       pendência.
 - [ ] **7b. hwdec Linux/macOS** — VA-API/NVDEC e VideoToolbox no mesmo crate
       (`register()` por plataforma); SW puro até lá.
-- [ ] **8. Maturação** — legenda embutida no MKV (requer exposição de faixa no hub),
-      tonemap HDR, VFR, extração do motor como crate, contribuição dos patches
-      upstream (`docs/upstream/`).
+- [x] **5c. Legenda embutida + chrome da playlist (dev, pós-v0.2.1)** — faixas de legenda do
+      próprio container (MKV `S_TEXT/UTF8|ASS|WEBVTT` e MP4 `tx3g`): auto-seleção pelo idioma do
+      app/sistema (primeira como fallback), externa vence embutida, S alterna e C cicla faixas;
+      extração em thread própria. A superfície vem do fork (`divergência 4` em
+      `docs/upstream/fork-patches.md`); `--probe` passou a listar as faixas. Painel `Itens` com a
+      altura do conteúdo (1 item não deixa buraco) e cap de 4 linhas com scroll interno; relógio e
+      botão CC ganharam respiro próprio na barra. Inclui o fix do **empty edit de corte por
+      stream-copy** no MP4 (divergência 5): o `corte.mp4` do teste ficava com o primeiro frame
+      congelado por 55 s e duração 5:00 herdada do arquivo original; agora abre em 4:04 e toca
+      desde o primeiro segundo.
+- [ ] **8. Maturação** — tonemap HDR, VFR, extração do motor como crate, contribuição dos
+      patches upstream (`docs/upstream/`). Legenda embutida: feita na 5c.
 
 ## Pendências conhecidas
 
@@ -47,6 +56,12 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
   ignorados (avisos no stderr); sem colisão de linhas nem quebra automática.
 - **Hot-swap de device de áudio** — trocar a saída exige reabrir faixa/app.
 - **Gapless** — auto-avanço da playlist funciona, mas sem gapless fora de MP3.
+- **Resize do painel `Itens`** — o painel acompanha o conteúdo com cap fixo de 4 linhas + scroll;
+  sem grip de redimensionamento (o `Panel` do craft não persiste um tamanho que conviva com a
+  altura automática do conteúdo). Pedido do João: avaliar quando o padrão craft expuser isso.
+- **Legenda embutida** — suporta texto (SRT/VTT/ASS do MKV e tx3g do MP4). Faixas bitmap
+  (PGS/VobSub) são listadas no `--probe` e ignoradas no player; `wvtt` em MP4 (amostras em caixas)
+  ainda não é interpretado.
 
 ## Dívida técnica
 

@@ -24,7 +24,7 @@ mod subtitle;
 mod video;
 
 use std::collections::VecDeque;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -164,6 +164,19 @@ fn open_url(url: &str) {
     }
 }
 
+/// De onde veio a legenda ativa: o tooltip do botão CC e o log de sessão
+/// registram a fonte (externa ao lado do vídeo ou faixa do container).
+#[derive(Clone, Default)]
+enum SubtitleSource {
+    #[default]
+    None,
+    External,
+    Embedded {
+        language: String,
+        codec: String,
+    },
+}
+
 struct PlayerApp {
     cfg: Config,
     playlist: resume::Playlist,
@@ -217,13 +230,25 @@ struct PlayerApp {
     last_activity: Instant,
     /// Seek pedido há pouco: repinta uns frames para mostrar o frame parado.
     seek_preview_until: Option<Instant>,
-    /// Legenda externa da faixa atual (SRT/VTT ao lado do vídeo), carregada
-    /// quando o container abre; `None` = sem arquivo/entradas válidas.
-    subtitles: Option<subtitle::Subtitles>,
+    /// Legenda da faixa atual: arquivo externo (SRT/VTT/ASS ao lado do vídeo)
+    /// ou faixa embutida no container; `None` = sem legenda. `Arc` porque a
+    /// lista de faixas embutidas (tecla C) compartilha as cues.
+    subtitles: Option<Arc<subtitle::Subtitles>>,
     /// Toggle de exibição (tecla S / botão CC); vale entre faixas.
     subtitles_on: bool,
     /// Atraso da legenda em segundos (+ = aparece depois; Z/X ±0,5 s).
     subtitle_delay: f64,
+    /// Fonte da legenda ativa (tooltip do CC e log).
+    subtitle_source: SubtitleSource,
+    /// Faixas embutidas legíveis do arquivo atual (tecla C cicla quando há mais
+    /// de uma); vazio quando a legenda ativa é externa ou não há legenda.
+    embedded: Vec<subtitle::Embedded>,
+    /// Índice da faixa embutida ativa em `embedded`.
+    embedded_idx: usize,
+    /// Extração das faixas embutidas rodando fora da UI thread: abrir/indexar o
+    /// container de novo (MKV lê os cabeçalhos dos clusters) travaria a janela
+    /// em arquivo grande.
+    embedded_rx: Option<Receiver<Result<Vec<subtitle::Embedded>, String>>>,
     /// Contadores de desempenho compartilhados com o motor e a thread de decode.
     metrics: Arc<metrics::Metrics>,
     /// Overlay de estatísticas (tecla D).
@@ -295,6 +320,10 @@ impl PlayerApp {
             subtitles: None,
             subtitles_on: true,
             subtitle_delay: 0.0,
+            subtitle_source: SubtitleSource::None,
+            embedded: Vec::new(),
+            embedded_idx: 0,
+            embedded_rx: None,
             metrics,
             show_stats: false,
             session: session_log::SessionLog::new(),
@@ -522,6 +551,12 @@ impl PlayerApp {
         // Sem imagem não há onde desenhar a legenda (e o atraso é por faixa).
         self.subtitles = None;
         self.subtitle_delay = 0.0;
+        self.subtitle_source = SubtitleSource::None;
+        // Extração em andamento é descartada: o canal antigo cai e o resultado
+        // tardio não contamina a próxima faixa.
+        self.embedded.clear();
+        self.embedded_idx = 0;
+        self.embedded_rx = None;
     }
 
     /// Mute/unmute (botão e tecla M), persistindo a preferência.
@@ -566,7 +601,7 @@ impl PlayerApp {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
-        let (f, r, space, m, left, right, esc, shift, s, z, x, d) = ctx.input(|i| {
+        let (f, r, space, m, left, right, esc, shift, s, c, z, x, d) = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::F),
                 i.key_pressed(egui::Key::R),
@@ -577,6 +612,7 @@ impl PlayerApp {
                 i.key_pressed(egui::Key::Escape),
                 i.modifiers.shift,
                 i.key_pressed(egui::Key::S),
+                i.key_pressed(egui::Key::C),
                 i.key_pressed(egui::Key::Z),
                 i.key_pressed(egui::Key::X),
                 i.key_pressed(egui::Key::D),
@@ -604,6 +640,9 @@ impl PlayerApp {
         }
         if s {
             self.toggle_subtitles();
+        }
+        if c {
+            self.cycle_subtitle_track();
         }
         if z {
             self.adjust_subtitle_delay(-0.5);
@@ -639,21 +678,101 @@ impl PlayerApp {
         self.status_warn = false;
     }
 
-    /// Carrega a legenda externa do arquivo atual. Sem arquivo ao lado (ou sem
-    /// nenhuma entrada válida), o player segue sem legenda.
+    /// Carrega a legenda da faixa atual: arquivo externo ao lado do vídeo
+    /// primeiro (é mais explícito) e, se não houver, as faixas embutidas do
+    /// container — extraídas em thread própria. Sem nada legível, o player segue
+    /// sem legenda.
     fn load_subtitles(&mut self) {
         self.subtitles = None;
         self.subtitle_delay = 0.0;
+        self.subtitle_source = SubtitleSource::None;
+        self.embedded.clear();
+        self.embedded_idx = 0;
+        self.embedded_rx = None;
         let Some(path) = self.idx.and_then(|i| self.playlist.files.get(i)).cloned() else {
             return;
         };
-        let Some(file) = subtitle::find_for(std::path::Path::new(&path)) else {
-            return;
-        };
-        match subtitle::Subtitles::load(&file) {
-            Ok(subs) => self.subtitles = Some(subs),
-            Err(e) => eprintln!("engine: legenda: {e}"),
+        if let Some(file) = subtitle::find_for(std::path::Path::new(&path)) {
+            match subtitle::Subtitles::load(&file) {
+                Ok(subs) => {
+                    eprintln!("engine: legenda: externa {}", file.display());
+                    self.subtitles = Some(Arc::new(subs));
+                    self.subtitle_source = SubtitleSource::External;
+                    return;
+                }
+                Err(e) => eprintln!("engine: legenda: {e}"),
+            }
         }
+        // Externa não existe/quebrou: tenta a faixa do container fora da UI
+        // thread (o resultado é drenado em `poll_embedded`).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = subtitle::load_embedded(std::path::Path::new(&path));
+            let _ = tx.send(result);
+        });
+        self.embedded_rx = Some(rx);
+    }
+
+    /// Drena a extração de legenda embutida (thread própria) sem travar a UI.
+    fn poll_embedded(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.embedded_rx else { return };
+        match rx.try_recv() {
+            Ok(Ok(tracks)) => {
+                self.embedded_rx = None;
+                self.on_embedded_ready(tracks);
+            }
+            Ok(Err(e)) => {
+                self.embedded_rx = None;
+                eprintln!("engine: legenda embutida: {e}");
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(120)),
+            Err(TryRecvError::Disconnected) => self.embedded_rx = None,
+        }
+    }
+
+    /// Faixas embutidas chegaram: guarda a lista (tecla C) e exibe a escolhida
+    /// pelo idioma do app/sistema (primeira quando nenhuma casa).
+    fn on_embedded_ready(&mut self, tracks: Vec<subtitle::Embedded>) {
+        if tracks.is_empty() {
+            return;
+        }
+        let lang = self.cfg.lang;
+        let preferred = subtitle::preferred_language(lang);
+        // Externa carregada vence a faixa do container (regra única testada em
+        // `subtitle::choose_source`; aqui normalmente a extração nem foi iniciada).
+        let has_external = matches!(self.subtitle_source, SubtitleSource::External);
+        let Some(subtitle::Source::Embedded(ix)) = subtitle::choose_source(has_external, &tracks, preferred) else { return };
+        let (language, codec, count) = (tracks[ix].language.clone(), tracks[ix].codec.clone(), tracks.len());
+        eprintln!("engine: legenda: embutida {language} ({codec}), {count} faixa(s) — exibindo a {}/{}", ix + 1, count);
+        self.subtitles = Some(tracks[ix].subs.clone());
+        self.embedded = tracks;
+        self.embedded_idx = ix;
+        self.subtitle_source = SubtitleSource::Embedded { language: language.clone(), codec: codec.clone() };
+        let t = |k: Key| i18n::t(lang, k);
+        self.status = format!("{}: {} · {} · {}", t(Key::Subtitles), t(Key::SubtitleEmbedded), language, codec);
+        self.status_warn = false;
+    }
+
+    /// Tecla C: próxima faixa embutida (só quando há mais de uma). Liga a
+    /// legenda de volta se o usuário tinha desligado com S.
+    fn cycle_subtitle_track(&mut self) {
+        if self.embedded.len() < 2 {
+            return;
+        }
+        self.embedded_idx = (self.embedded_idx + 1) % self.embedded.len();
+        let lang = self.cfg.lang;
+        let (ix, count, language, codec) = (
+            self.embedded_idx,
+            self.embedded.len(),
+            self.embedded[self.embedded_idx].language.clone(),
+            self.embedded[self.embedded_idx].codec.clone(),
+        );
+        eprintln!("engine: legenda: faixa embutida {}/{count}: {language} ({codec})", ix + 1);
+        self.subtitles = Some(self.embedded[ix].subs.clone());
+        self.subtitles_on = true;
+        self.subtitle_source = SubtitleSource::Embedded { language: language.clone(), codec: codec.clone() };
+        self.status = format!("{} {}/{}: {language} · {codec}", i18n::t(lang, Key::SubtitleTrack), ix + 1, count);
+        self.status_warn = false;
     }
 
     /// Qualquer mouse/tecla recente mantém os controles visíveis.
@@ -870,6 +989,10 @@ impl PlayerApp {
         }
     }
 
+    /// Altura alocada da barra de seek (o trilho é fino; 16 evita o vão morto do
+    /// padrão de 20 px em cima e embaixo).
+    const SEEK_BAR_H: f32 = 16.0;
+
     /// Barra de controles do player (painel na janela, overlay no fullscreen).
     ///
     /// Linha 1: transporte + relógio (esquerda) e volume/tela cheia/legenda
@@ -897,7 +1020,7 @@ impl PlayerApp {
             if icons::icon_button(ui, icons::Icon::Next, t(Key::Next), false, can_play).on_hover_text(t(Key::Next)).clicked() {
                 self.play_next();
             }
-            ui.add_space(4.0);
+            ui.add_space(10.0);
             // Relógio em fonte de largura fixa: o tempo não "pula" a cada segundo.
             ui.label(egui::RichText::new(format!("{:>8} / {:>8}", fmt_time(self.position), fmt_time(self.duration))).monospace());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -931,10 +1054,21 @@ impl PlayerApp {
                     if icons::icon_button(ui, icons::Icon::Rotate, t(Key::Rotate), false, true).on_hover_text(t(Key::Rotate)).clicked() {
                         self.rotate(ui.ctx(), 1);
                     }
+                    // A legenda é um grupo próprio (não da janela): respiro
+                    // extra antes do CC para não colar no girar/fullscreen.
+                    ui.add_space(8.0);
                     let cc_on = self.subtitles_on && self.subtitles.is_some();
-                    let cc_hover = match self.subtitles.as_ref() {
-                        Some(subs) => format!("{}\n{}", t(Key::Subtitles), subs.path),
-                        None => t(Key::Subtitles).to_owned(),
+                    let cc_hover = match (self.subtitles.as_ref(), &self.subtitle_source) {
+                        (Some(_), SubtitleSource::Embedded { language, codec }) => {
+                            let mut hover = format!("{}\n{} · {language} · {codec}", t(Key::Subtitles), t(Key::SubtitleEmbedded));
+                            if self.embedded.len() > 1 {
+                                hover.push('\n');
+                                hover.push_str(t(Key::SubtitleTrack));
+                            }
+                            hover
+                        }
+                        (Some(subs), _) => format!("{}\n{}", t(Key::Subtitles), subs.path),
+                        (None, _) => t(Key::Subtitles).to_owned(),
                     };
                     if icons::icon_button(ui, icons::Icon::Subtitles, t(Key::Subtitles), cc_on, self.subtitles.is_some())
                         .on_hover_text(cc_hover)
@@ -945,7 +1079,6 @@ impl PlayerApp {
                 }
             });
         });
-        ui.add_space(4.0);
         // Seek: durante o arrasto a UI manda; fora dele a posição vem do
         // relógio mestre (PositionHint). Antes o slider ficava com a largura
         // padrão do egui (100 pts) e aparecia como um slider órfão no canto.
@@ -953,6 +1086,9 @@ impl PlayerApp {
         let mut value = if self.scrubbing { self.scrub_value } else { self.position.clamp(0.0, dur) };
         let bar = ui
             .scope(|ui| {
+                // `interact_size` vertical menor: o slider desenha uma trilha
+                // fina no meio de 20 px e sobrava vão morto em cima/embaixo.
+                ui.spacing_mut().interact_size.y = Self::SEEK_BAR_H;
                 ui.spacing_mut().slider_width = ui.available_width().max(80.0);
                 ui.add_enabled(dur > 0.0, egui::Slider::new(&mut value, 0.0..=dur.max(0.001)).show_value(false).trailing_fill(true))
             })
@@ -1041,6 +1177,9 @@ impl eframe::App for PlayerApp {
             self.handle_engine_event(ev);
         }
         self.pump_video(ctx);
+        // Legenda embutida extraída em thread própria (chega alguns frames
+        // depois do VideoOpened).
+        self.poll_embedded(ctx);
 
         // Cadência de repaint: com vídeo, acorda quando o próximo frame vence
         // (não a 120 Hz fixos: repaint à toa compete com o decode pela CPU e
@@ -1169,8 +1308,16 @@ impl eframe::App for PlayerApp {
         if !hide_chrome && !self.fullscreen {
             egui::containers::Panel::bottom("controles").show(ui, |ui| self.controls_panel(ui));
 
-            // Playlist: painel inferior fixo.
-            egui::containers::Panel::bottom("playlist").exact_size(140.0).resizable(false).show(ui, |ui| {
+            // Playlist: painel inferior com a altura do CONTEÚDO (um item deixa
+            // o painel do tamanho da linha + respiro, sem buraco). Muitas
+            // linhas: cap de [`PLAYLIST_MAX_ROWS`] e a lista rola dentro.
+            // A altura vem do ScrollArea `max_height` + `auto_shrink` vertical:
+            // nada de `exact_size` com conta de margem de tema (era a fonte do
+            // painel alto demais com 1 item).
+            let rows = self.playlist.files.len().clamp(1, PLAYLIST_MAX_ROWS);
+            let spacing_y = ui.spacing().item_spacing.y;
+            let list_h = rows as f32 * PLAYLIST_ROW_H + rows.saturating_sub(1) as f32 * spacing_y;
+            egui::containers::Panel::bottom("playlist").resizable(false).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong(t(Key::Items));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1210,7 +1357,7 @@ impl eframe::App for PlayerApp {
                         }
                     });
                 });
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                     // Sem clone por frame: só os índices.
                     for i in 0..self.playlist.files.len() {
                         let name = file_name(&self.playlist.files[i]);
@@ -1222,6 +1369,7 @@ impl eframe::App for PlayerApp {
                         }
                     }
                 });
+                ui.add_space(PLAYLIST_BREATHING);
             });
         }
 
@@ -1304,11 +1452,20 @@ fn ghost(ui: &mut egui::Ui, label: &str) -> egui::Response {
     resp
 }
 
+/// Altura de uma linha da playlist (mesma de [`playlist_row`]).
+const PLAYLIST_ROW_H: f32 = 22.0;
+/// Linhas visíveis antes de a lista rolar dentro do painel (~4 linhas: abre
+/// pasta sem tomar a tela; o resize manual do painel é pendência documentada no
+/// ROADMAP — o painel acompanha o conteúdo, não tem grip).
+const PLAYLIST_MAX_ROWS: usize = 4;
+/// Respiro embaixo da lista (o painel encosta na barra de controles).
+const PLAYLIST_BREATHING: f32 = 6.0;
+
 /// Linha da playlist: largura toda, altura fixa e o par hover/seleção do tema
 /// (mesmo tratamento de lista dos irmãos, com o caminho completo no tooltip).
 fn playlist_row(ui: &mut egui::Ui, name: &str, selected: bool, path: &str) -> egui::Response {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, PLAYLIST_ROW_H), egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, ui.is_enabled(), selected, name));
     let visuals = ui.visuals();
     let fill = if selected {

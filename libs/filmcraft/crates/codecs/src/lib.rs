@@ -33,6 +33,8 @@ pub mod mpeg;
 pub mod mxf;
 pub mod ogg;
 mod stream_color;
+// fork local-player-rs: faixas de legenda embutidas (o hub só expunha vídeo/áudio).
+pub mod subtitles;
 pub mod video;
 mod webm_alpha;
 pub mod y4m;

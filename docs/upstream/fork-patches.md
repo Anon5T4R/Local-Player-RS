@@ -16,7 +16,9 @@ quebra de linha). O método que vale:
 
 Resultado do passo 2: **só dois arquivos diferem de fato** — `Cargo.toml` (empacotamento do
 vendor) e `crates/codecs/src/gop.rs` (a mudança funcional). Os outros 422 são idênticos ao upstream
-fora a formatação.
+fora a formatação. Depois dessa comparação o fork ganhou mais dois arquivos/trechos:
+**`crates/codecs/src/subtitles.rs`** (divergência 4, módulo novo registrado em
+`crates/codecs/src/lib.rs`) e **`crates/codecs/src/mp4.rs`** (divergência 5, empty edit de corte).
 
 ## Divergência 1 — teto do cache de frames configurável pelo host (`crates/codecs/src/gop.rs`)
 
@@ -115,6 +117,97 @@ mesmo crate. Enquanto isso, este fork mantém a cópia e anota cada ponto de mud
 **Pendências herdadas do upstream.** O readback é GPU→CPU (staging texture) e o upload para a wgpu
 continua no app: zero-copy D3D11 → wgpu é bônus, não implementado.
 
+## Divergência 4 — faixas de legenda embutidas (`crates/codecs/src/subtitles.rs`, novo)
+
+**O que muda.** Módulo novo no hub, sem tocar o `MediaInfo` do craft-media:
+
+- `subtitles::probe(&SharedReader)` — lista as faixas de legenda do container (índice, ID, idioma,
+  nome, codec): isobmff (handler `sbtl`/`subt`/`text`/`clcp`) e matroska (`TrackType` 0x11);
+- `subtitles::extract` / `extract_path` — abre o demuxer já vendorizado e devolve, por faixa, as
+  amostras com `start`/`end` em segundos e o payload cru, em ordem de tempo;
+- `SubtitleCodec` diz como interpretar o payload: `S_TEXT/UTF8` → `SubRip`;
+  `S_TEXT/WEBVTT` (e `D_WEBVTT/*`) → `WebVtt`; `S_TEXT/ASS`/`S_TEXT/SSA` (com o `CodecPrivate`
+  como cabeçalho) → `Ass`; `tx3g`/`text` → `Tx3g`; qualquer outro (PGS/DVD bitmap) fica `Other`,
+  listado mas não suportado.
+
+**Por quê.** O hub do FilmCraft é do editor e só expõe vídeo/áudio no `MediaInfo`; o player precisa
+da legenda que o mpv lia ("tem nesses arquivos"). O player consome `filmcraft-codecs` como
+biblioteca, então a superfície nova fica aqui — o `craft-media` vendored não é alterado.
+
+**Decisão de desenho.** O fork **não interpreta texto**: entrega o payload cru + os tempos do
+container (o único que sabe o timing real: `stts`/edit list no MP4, `BlockDuration`/`TimestampScale`
+no MKV). Os parsers (SRT/VTT/ASS do app e o `tx3g` novo) ficam em `src/subtitle/`, onde o render
+vive. Matroska é aberto com `OpenOptions { index: true }` (scan de cabeçalhos de cluster, nunca o
+payload do vídeo); o app roda a extração numa thread própria.
+
+**Testes no fork.** `extrai_legenda_subrip_de_mkv` gera um MKV com o próprio `MkvWriter` (faixa
+`S_TEXT/UTF8`, `language=por`) e confere idioma, codec e tempos (1 s→3 s, 4 s→5,5 s);
+`mapeia_codecs_de_legenda` cobre o mapeamento. Rodados com `cargo test -p filmcraft-codecs` no
+workspace do fork.
+
+**Proposta de upstream (não submetida).** `MediaInfo` ganhar `subtitles: Vec<SubtitleStreamInfo>`
+e um `MediaSource::subtitle(track, time)`; enquanto isso o player usa este módulo, que não muda
+nenhum comportamento existente (`probe` e `extract` são opt-in).
+
+## Divergência 5 — empty edit de corte por stream copy (`crates/codecs/src/mp4.rs`)
+
+**O que muda.** O `Mp4Source` ignora o *empty edit* inicial longo (`media_time = -1`, mais de
+`CUT_LEAD_IN_SECS` = 1 s) que um `ffmpeg -ss … -t … -c copy` deixa no `elst`:
+
+- `ignore_leading_empty_edits` subtrai o vazio do `edit_offset` de cada faixa;
+- `presentation_duration` deixa de somar esse vazio (a duração passa a ser a soma dos edits que
+  tocam, que coincide com o `mdhd` no arquivo cortado);
+- o empty edit **curto** (o de um frame que alguns encoders escrevem para o atraso de reordenação)
+  continua valendo — o teste upstream `duration_follows_the_edit_list` segue passando.
+
+**Evidência no arquivo do João.** `Ado … - corte.mp4` (23.542.071 bytes):
+
+- `mvhd`: timescale 441.000.000, duration 132.147.210.000 = **299,654 s** (duração original);
+- `mdhd`: vídeo **244,211 s**, áudio 244,320 s, legenda `tx3g` 270,749 s;
+- `elst` do vídeo: `empty = 24.426.402.000` (movie ts) = **55,389 s**, depois 244,211 s de mídia
+  com `media_time = 1001`; o do áudio: empty 55,334 s + 244,320 s;
+- **nenhuma amostra além do EOF**: a última amostra de vídeo termina em 23.283.792, a de áudio em
+  23.285.650, o arquivo tem 23.542.071 bytes (a hipótese "índice além do truncado" não se aplica a
+  este arquivo — o que ficou herdado foi o `elst`, não offsets).
+
+**Sintoma.** O demux aplica o vazio no `edit_offset`, então a posição 0 de apresentação cai antes
+do primeiro sample: o GopCache devolve o **primeiro frame** e o vídeo fica congelado durante os
+55,4 s do vazio (o áudio segue em paralelo) enquanto a barra de seek mostra 5:00. Depois do fix:
+`--probe` diz **4:04.211** e o conteúdo anda desde o primeiro segundo (o `.mkv` do mesmo take nunca
+foi afetado: Matroska não tem edit list; `--probe` sempre deu 4:04.320).
+
+**Teste.** `leading_empty_edit_does_not_freeze_the_clip` gera um MP4 com o próprio `Mp4Writer`
+(2 s de empty edit + 1 s de AAC) e confere duração (~1 s, não 3 s) e áudio não-silencioso em t=0;
+a suíte do `filmcraft-codecs` passa (137 testes).
+
+**Patch.** [`0002-mp4-leading-empty-edit.patch`](0002-mp4-leading-empty-edit.patch) — validado com
+`git apply --check -p1` contra o `mp4.rs` do snapshot `8fda2f2`.
+
+**Texto de PR (inglês, pronto para colar):**
+
+```
+codecs: ignore the empty edit a stream-copy cut leaves at the start
+
+`ffmpeg -ss … -t … -c copy` (and similar stream-copy trims) can write an `elst`
+whose presentation starts with an empty edit for the discarded span while the
+media samples still begin at zero. The movie header keeps the pre-cut duration,
+and the demuxer applies the empty edit to `edit_offset`, so media time zero maps
+before the first sample: a frame lookup clamps to the first picture and a player
+shows it frozen for the whole empty span, with the stale duration in its seek
+bar. Matroska files from the same trim are unaffected (no edit list), which is
+why the bug only showed on the MP4 side.
+
+Treat a leading empty edit longer than one second as a cut artifact: subtract it
+from `edit_offset` and stop counting it in `presentation_duration`. Short empty
+edits (the one-frame reorder delay some encoders write, covered by
+`duration_follows_the_edit_list`) and `media_time`/priming edits keep their
+current meaning.
+
+Test: `leading_empty_edit_does_not_freeze_the_clip` muxes an AAC track with a
+2 s empty edit plus 1 s of media and checks the clip lasts its media duration and
+that audio at t=0 is not the empty edit's silence.
+```
+
 ## Fora do fork (nem divergência, nem patch)
 
 - **Prioridade da thread de decode.** O app baixa a prioridade da própria thread `video-decode`
@@ -122,10 +215,9 @@ continua no app: zero-copy D3D11 → wgpu é bônus, não implementado.
   competir com a UI pelo CPU. O fork não tem ponto de entrada para isso (o pool de decoders é
   interno e não expõe prioridade) e mexer nisso exigiria API nova: **proposta em aberto**, sem
   código preparado aqui — não queríamos mandar patch não exercitado pelo app.
-- **Legendas embutidas no MKV.** O hub (`MediaSource`/`MediaInfo`) não expõe faixas de legenda
-  (só vídeo e áudio), então o player só lê legenda externa. O demuxer `craft-media::matroska` já
-  reconhece `SubRip`/`WebVtt`/`Ass`; uma contribuição possível seria um `MediaSource::subtitles()`
-  no filmcraft-media. Não implementado, não submetido — anotado para a fase de maturação.
+- **Parser `tx3g`/conversão de cues (app).** `src/subtitle/tx3g.rs` lê o `u16` de tamanho + texto
+  UTF-8 e `src/subtitle/embedded.rs` monta SRT/VTT/script ASS sintéticos para os parsers existentes.
+  Fica no app porque é onde o render vive; o fork só entrega payload + tempo (divergência 4).
 
 ## Limitações conhecidas do patch
 

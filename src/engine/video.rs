@@ -87,6 +87,14 @@ pub(super) fn open_media(path: &str) -> Result<SharedSource, EngineError> {
         .map_err(|e| EngineError::Open(e.to_string()))
 }
 
+/// Faixas de legenda embutidas do container (o `--probe` lista; a UI extrai as
+/// cues por [`crate::subtitle`]). Só lê o índice/`Tracks`, nunca o payload.
+pub(super) fn subtitle_tracks(path: &str) -> Result<Vec<filmcraft_codecs::subtitles::SubtitleTrack>, EngineError> {
+    let file = filmcraft_media::reader::FileReader::open(Path::new(path)).map_err(|e| EngineError::Open(format!("{path}: {e}")))?;
+    let reader: SharedReader = Arc::new(file);
+    filmcraft_codecs::subtitles::probe(&reader).map_err(|e| EngineError::Open(e.to_string()))
+}
+
 // ── áudio do container ───────────────────────────────────────────────────
 
 /// Faixa de áudio do container via hub: janelas aleatórias na taxa do device.
