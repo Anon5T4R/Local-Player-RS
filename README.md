@@ -117,14 +117,14 @@ upload/repaint".
 | --- | --- |
 | `LOCALPLAYER_FRAME_CACHE_MB` | teto do cache de frames decodificados (padrão 128; `0` volta ao teto do fork, 384 MB) |
 | `LOCALPLAYER_DECODE_THREADS` | máximo de threads dos decoders de vídeo (H.264/HEVC/VP9/AV1) e do pool do fork (padrão `0` = todos os núcleos). Em 1080p H.264, `2` ainda sobra ~4,7× de folga e libera CPU para a UI/áudio/outros programas |
-| `LOCALPLAYER_TLS_FALLBACK` | válvula de emergência do TLS do update: `1` repete a requisição com o provider padrão (ring) quando o provider 100% Rust falha num handshake. Padrão desligado — a falha aparece como erro, não é mascarada |
 
 **TLS do update é 100% Rust.** O check de release e o download do instalador usam
-`rustls-rustcrypto` (pure Rust) como caminho único. O log de sessão registra o
-provider em uso na linha `tls_provider=pure`: um check manual começa com
+o fork vendored do `rustls-rustcrypto` (pure Rust) como caminho único — nenhum
+provider C (`ring`/`aws-lc-sys`) é compilado no app. O log de sessão registra
+`tls_provider=pure` antes da primeira linha: um check manual começa com
 `event=update_check start` (e o provider sai antes dela), uma falha grava
-`event=update_check_failed` com o detalhe. `tls_provider=fallback(...)` só aparece
-com `LOCALPLAYER_TLS_FALLBACK=1`.
+`event=update_check_failed` com o detalhe. Não há fallback: falha de handshake
+vira erro visível, nunca um retry silencioso em outro backend.
 
 > **PowerShell no Windows:** o `.exe` de release é subsistema GUI, então o
 > PowerShell não espera o processo terminar (a saída aparece depois do prompt e

@@ -54,11 +54,8 @@ ignore = [
     # paste e proc-macro-error são unmaintained (sem vulnerabilidade). Chegam como
     # proc macros do derive de serde/egui em tempo de COMPILAÇÃO, não no binário.
     { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; proc macro em tempo de compilação" },
-    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error unmaintained; proc macro em tempo de compilação" },
     # quick-xml (dev/graph do keepass + svg do image): DoS ao parsear XML hostil.
     # O único XML que deciframos em runtime é o KDBX importado pelo PRÓPRIO usuário.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml DoS quadrático; XML de entrada é do próprio usuário" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml alocação de namespace; XML de entrada é do próprio usuário" },
     # ttf-parser unmaintained (sem vulnerabilidade): fontes são as embutidas do egui.
     { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; só fontes embutidas do egui" },
     # Stack D-Bus do accesskit no Linux (atspi -> zbus), unmaintained sem successor.
@@ -68,31 +65,27 @@ ignore = [
     # zip 2.6.1 (sem release fixada): as três abaixo são do ZipArchive::extract() com
     # alvo hostil. O autoupdate usa by_index + escrita manual e baixa zip SÓ do
     # nosso release no GitHub via HTTPS (ureq + webpki-roots). Revisitar quando sair zip fixado.
-    { id = "RUSTSEC-2026-0367", reason = "SUID em extract(); não usamos extract() — by_index + escrita manual" },
-    { id = "RUSTSEC-2026-0368", reason = "symlink em extract(); não usamos extract() — by_index + escrita manual" },
-    { id = "RUSTSEC-2026-0369", reason = "symlink/permissões em extract(); não usamos extract() — by_index + escrita manual" },
     # Decompressores (zstd/legacy) do zip: o zip processado é o do nosso release
     # oficial (canal HTTPS autenticado), não entrada hostil. Revisitar com zip fixado.
-    { id = "RUSTSEC-2026-0391", reason = "leak entre streams de zip; entrada é o release oficial no GitHub" },
-    { id = "RUSTSEC-2026-0398", reason = "Vec além da capacidade em decompress; entrada é o release oficial no GitHub" },
-    { id = "RUSTSEC-2026-0403", reason = "memória não inicializada em frame legacy; entrada é o release oficial no GitHub" },
-    # ── // local-player-rs: experimento TLS 100% Rust (rustls-rustcrypto 0.0.2-alpha) ──
-    # O provider puxa rustls-webpki 0.102 SÓ pelo newtype `alg_id` (identificador
-    # de algoritmo da assinatura). A verificação de cadeia é do rustls 0.23.46
-    # (rustls-webpki 0.103.16) + verifier do SO; nenhuma função destas advisories
-    # (CRL, name constraints, chain building) é alcançável. Revisitar quando o
-    # rustls-rustcrypto migrar para webpki 0.103 — se o experimento ficar, o certo
-    # é cobrar upstream/vendorizar em vez de manter o ignore.
-    { id = "RUSTSEC-2026-0049", reason = "webpki 0.102 só pelo tipo alg_id; verificação de cadeia é webpki 0.103 + SO" },
-    { id = "RUSTSEC-2026-0098", reason = "webpki 0.102 só pelo tipo alg_id; name constraints nunca avaliadas aqui" },
-    { id = "RUSTSEC-2026-0099", reason = "webpki 0.102 só pelo tipo alg_id; name constraints nunca avaliadas aqui" },
-    { id = "RUSTSEC-2026-0104", reason = "webpki 0.102 só pelo tipo alg_id; CRL não é parseada aqui" },
-    { id = "RUSTSEC-2026-0382", reason = "webpki 0.102 só pelo tipo alg_id; a verificação real usa 0.103.16" },
-    # rsa/crypto-bigint vêm da VERIFICAÇÃO de assinatura RSA (chave pública) do
-    # provider: o cliente não decifra nem assina, então o ataque de timing
-    # (Marvin: recuperação da chave privada em decifração) não tem alvo aqui.
-    { id = "RUSTSEC-2023-0071", reason = "rsa só verifica assinatura de servidor (chave pública); cliente não decifra" },
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint do rsa: operações de chave privada não acontecem no cliente" },
+    # ── // local-player-rs: experimento TLS 100% Rust (fork vendored do rustls-rustcrypto) ──
+    # Os advisories do rustls-webpki 0.102 SAÍRAM: o fork em libs/rustls-rustcrypto
+    # não depende mais dele (as constantes `alg_id` vêm do rustls-pki-types 1.14),
+    # então a verificação de cadeia do app é só a do rustls 0.23.46 (webpki 0.103)
+    # com o verifier do SO.
+    #
+    # Sobram dois, ambos sem correção possível hoje:
+    # - RUSTSEC-2023-0071 (rsa, Marvin): `patched = []` no advisory — nem o 0.9.10
+    #   nem o 0.10.0-rc são corrigidos. O cliente só VERIFICA assinatura com chave
+    #   pública (CertificateVerify do servidor); recuperação de chave privada por
+    #   timing não tem alvo aqui. Sair do `rsa` significaria abrir mão de verificar
+    #   servidores com certificado RSA — não é opção.
+    # - RUSTSEC-2026-0387 (crypto-bigint 0.5.5): corrigido em >= 0.7.6, mas o
+    #   crypto-bigint 0.5 chega pelo rsa 0.9 (que exige a série 0.5). As operações
+    #   secret-dependentes (subtração, Montgomery, invert) são de chave privada;
+    #   o cliente só faz aritmética de chave pública. Revisitar quando o
+    #   rustls-rustcrypto migrar para rsa 0.10/crypto-bigint 0.7.
+    { id = "RUSTSEC-2023-0071", reason = "rsa sem patch (0.9.10 e 0.10-rc afetados); cliente só verifica assinatura de servidor com chave pública" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 via rsa 0.9 (fix exige rsa 0.10); cliente não opera chave privada" },
 ]
 
 # Fontes padrão do egui (Ubuntu-Light, Hack, emoji-icon-font): licenças de fonte

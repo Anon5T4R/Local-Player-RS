@@ -259,8 +259,6 @@ struct PlayerApp {
     show_stats: bool,
     /// Log automático de sessão/anomalias (sempre ligado; ver `session_log.rs`).
     session: session_log::SessionLog,
-    /// Versão do estado do provider TLS do update (o app loga quando troca).
-    tls_version: u64,
     /// PTS do último frame que foi para a tela (detecta stall com fila vazia).
     last_video_pts: f64,
     /// Chrome interno da janela (topo + controles + playlist), em points.
@@ -346,14 +344,13 @@ impl PlayerApp {
             metrics,
             show_stats: false,
             session: session_log::SessionLog::new(),
-            tls_version: craft_update::tls::version(),
             last_video_pts: 0.0,
             chrome: egui::Vec2::ZERO,
             fitted: None,
             fit_pending: 0,
             fit_target: None,
         };
-        // // local-player-rs: provider TLS do update em uso (pure por padrão).
+        // // local-player-rs: provider TLS do update (100% Rust, caminho único).
         // Fica pendente no log e sai com a primeira linha da sessão.
         app.session.tls(&craft_update::tls::status_line());
         if let Some(i) = idx {
@@ -1267,13 +1264,6 @@ impl eframe::App for PlayerApp {
         // Update (craft_update): bombeia o check/instalação que rodam fora
         // da UI thread (mesmo desenho do Local-Keys).
         self.updater.tick(ctx);
-        // // local-player-rs: o provider TLS do update pode trocar (válvula
-        // LOCALPLAYER_TLS_FALLBACK=1); a troca vira uma linha do log na hora.
-        let tls_version = craft_update::tls::version();
-        if tls_version != self.tls_version {
-            self.tls_version = tls_version;
-            self.session.tls(&craft_update::tls::status_line());
-        }
         // Atividade do usuário e atalhos (F fullscreen, R/Shift+R rotação,
         // Espaço play/pause, M mute, ←/→ ±5 s).
         self.note_activity(ctx);

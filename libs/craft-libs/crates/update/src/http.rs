@@ -2,7 +2,6 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::protocol::{CANCELLED, PAUSED};
@@ -32,11 +31,9 @@ pub enum Fetched {
 
 #[derive(Clone)]
 pub struct Http {
-    /// Agents com o provider puro (`rustls-rustcrypto`) — o caminho único.
-    pure: Agents,
-    /// Os mesmos agents com o provider padrão do ureq (ring): só entram com a
-    /// válvula de emergência `LOCALPLAYER_TLS_FALLBACK=1` (`tls::note_fallback`).
-    standard: Agents,
+    /// // local-player-rs: um único conjunto de agentes, sempre com o provider
+    /// `rustls-rustcrypto` (o caminho puro; não há fallback).
+    agents: Agents,
     token: Option<String>,
 }
 
@@ -141,41 +138,23 @@ impl Http {
         // The OS checks each certificate chain itself: Windows fetches roots it hasn't stored yet
         // and trusts what antivirus HTTPS scanning installs. Reading the store ourselves missed
         // both ("invalid peer certificate: UnknownIssuer").
-        // // local-player-rs: o provider puro (rustls-rustcrypto) é o padrão; o MESMO conjunto
-        // de agentes é construído com o provider padrão do ureq (ring) para o fallback.
-        let tls_for = |crypto: Option<&Arc<rustls::crypto::CryptoProvider>>| {
-            let mut builder = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier);
-            if let Some(crypto) = crypto {
-                builder = builder.unversioned_rustls_crypto_provider(Arc::clone(crypto));
-            }
-            builder.build()
-        };
+        // // local-player-rs: provider puro (rustls-rustcrypto) é o caminho ÚNICO do app - não há
+        // conjunto de agentes com o provider padrão (ring): ele nem é compilado.
+        let tls = ureq::tls::TlsConfig::builder()
+            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+            .unversioned_rustls_crypto_provider(tls::pure_provider())
+            .build();
         // Chosen once: the proxy environment variables, else the OS proxy setting.
         let proxy = crate::proxy::pick();
-        let pure_crypto = tls::pure_provider();
-        let pure = agents(user_agent, tls_for(Some(&pure_crypto)), proxy.clone());
-        let standard = agents(user_agent, tls_for(None), proxy);
-        Ok(Self { pure, standard, token: None })
+        Ok(Self { agents: agents(user_agent, tls, proxy), token: None })
     }
 
-    /// O conjunto de agentes do provider em uso agora.
-    fn active(&self) -> &Agents {
-        if tls::is_pure() { &self.pure } else { &self.standard }
-    }
-
-    /// Roda `op` com o provider ativo. Com a válvula de emergência
-    /// (`LOCALPLAYER_TLS_FALLBACK=1`) uma falha de handshake/transporte no
-    /// provider puro é repetida UMA vez no padrão (ring) e registrada; sem a
-    /// válvula o erro sobe como qualquer outro (o app mostra na linha de status
-    /// e o log de sessão registra `tls_provider=pure`).
-    fn with_agents<T>(&self, op: impl Fn(&Agents) -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
-        match op(self.active()) {
-            Err(e) if tls::may_fallback(&e) => {
-                tls::note_fallback(&e);
-                op(&self.standard)
-            }
-            other => other,
-        }
+    /// Roda `op` com o único conjunto de agentes (provider puro). Uma falha de
+    /// handshake/transporte sobe como qualquer outro erro: o app mostra na linha
+    /// de status e o log de sessão registra `tls_provider=pure` - sem retry em
+    /// outro backend.
+    fn request<T>(&self, op: impl Fn(&Agents) -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
+        op(&self.agents)
     }
 
     /// An optional token raises GitHub's limit from 60 to 5000 requests an hour. Only ever sent
@@ -189,7 +168,7 @@ impl Http {
     /// GET a GitHub API resource, revalidating with `etag` when given.
     pub fn get_api(&self, url: &str, etag: Option<&str>) -> Result<Fetched, String> {
         let mut resp = self
-            .with_agents(|a| {
+            .request(|a| {
                 let mut req = a.small.get(url).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28");
                 if let Some(tag) = etag {
                     req = req.header("If-None-Match", tag);
@@ -229,7 +208,7 @@ impl Http {
     pub fn get_feed(&self, url: &str) -> Result<String, FeedError> {
         let failed = |why: String| FeedError { why, throttled: false, retry_after: None };
         let mut resp = self
-            .with_agents(|a| {
+            .request(|a| {
                 let agent = if is_loopback(url) { &a.direct } else { &a.feed };
                 agent.get(url).header("Accept", "application/json").call()
             })
@@ -245,7 +224,7 @@ impl Http {
     /// GET a small text file (following redirects).
     pub fn get_text(&self, url: &str) -> Result<Option<String>, String> {
         let mut resp = self
-            .with_agents(|a| {
+            .request(|a| {
                 let agent = if is_loopback(url) { &a.direct } else { &a.small };
                 agent.get(url).call()
             })
@@ -262,7 +241,7 @@ impl Http {
     /// on the body when the length wasn't announced or was wrong.
     pub fn get_bytes(&self, url: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
         let mut resp = self
-            .with_agents(|a| {
+            .request(|a| {
                 let agent = if is_loopback(url) { &a.direct } else { &a.small };
                 agent.get(url).call()
             })
@@ -285,7 +264,7 @@ impl Http {
 
     /// Where `url` redirects to, without following it.
     pub fn redirect_target(&self, url: &str) -> Result<Option<String>, String> {
-        let resp = self.with_agents(|a| a.no_redirect.head(url).call()).map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let resp = self.request(|a| a.no_redirect.head(url).call()).map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             300..=399 => Ok(resp.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string)),
             404 => Ok(None),
@@ -391,7 +370,7 @@ impl Http {
     fn attempt(&self, url: &str, part: &Path, have: u64, size: u64, stop: &Stop, progress: &mut dyn FnMut(Transfer)) -> Result<(), AttemptError> {
         let retry = |error: String, progressed: bool| AttemptError::Retry { error, progressed };
         // Binaries are already compressed; ask for the bytes exactly as published.
-        let mut resp = match self.with_agents(|a| {
+        let mut resp = match self.request(|a| {
             let agent = if is_loopback(url) { &a.direct_download } else { &a.download };
             let mut req = agent.get(url).header("Accept-Encoding", "identity");
             if have > 0 {

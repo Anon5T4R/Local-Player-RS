@@ -179,8 +179,7 @@ fn print_help(out: &mut dyn Write) {
          \x20 tecla D               overlay de estatísticas no vídeo\n\
          \x20 LOCALPLAYER_STATS=<arquivo.csv|1>   uma linha por segundo\n\
          \x20 LOCALPLAYER_FRAME_CACHE_MB=<MB>     teto do cache de frames (padrão 128)\n\
-         \x20 LOCALPLAYER_DECODE_THREADS=<N>      threads de decode / pool (padrão 0 = todos)\n\
-         \x20 LOCALPLAYER_TLS_FALLBACK=1          TLS do update cai p/ o provider padrão (emergência)",
+         \x20 LOCALPLAYER_DECODE_THREADS=<N>      threads de decode / pool (padrão 0 = todos)",
         env!("CARGO_PKG_VERSION")
     );
 }

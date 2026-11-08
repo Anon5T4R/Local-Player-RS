@@ -47,7 +47,8 @@ fn github_update_check_works_with_the_pure_provider() {
         None => println!("release encontrada = nenhuma (tag/repo sem release publicada)"),
     }
 
-    // Nada caiu para o provider padrão no caminho.
-    assert!(craft_update::tls::is_pure(), "o provider trocou: {}", craft_update::tls::status_line());
+    // O caminho é único: o log de sessão continua dizendo `tls_provider=pure`
+    // depois do check (não existe mais fallback para outro backend).
+    assert_eq!(craft_update::tls::status_line(), "tls_provider=pure", "o provider trocou depois do check");
     println!("tls_provider (depois) = {}", craft_update::tls::status_line());
 }

@@ -84,23 +84,24 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       Caveat: o bench roda sem UI/GPU — o ganho de responder a UI com o rustc comendo CPU precisa
       de QA manual no notebook.
 - [x] **11. TLS 100% Rust no update (experimento, dev)** — o `craft-update` vendored deste app usa
-      `rustls-rustcrypto 0.0.2-alpha` (MIT OR Apache-2.0) como provider ÚNICO do rustls (check de
-      release + download do instalador). **Sem fallback por padrão**: handshake que falhe vira
-      erro (linha de status do "Verificar atualizações" + `event=update_check_failed` no log, com
-      `tls_provider=pure` na linha anterior). Válvula de emergência `LOCALPLAYER_TLS_FALLBACK=1`
-      repete a requisição uma vez no provider padrão (ring) e loga `tls_provider=fallback(motivo)`.
+      o **fork vendored** do `rustls-rustcrypto 0.0.2-alpha` (`libs/rustls-rustcrypto`, MIT OR
+      Apache-2.0) como provider ÚNICO do rustls (check de release + download do instalador).
+      **Sem fallback**: não existe válvula nem segundo conjunto de agentes — handshake que falhe
+      vira erro (linha de status do "Verificar atualizações" + `event=update_check_failed` no log,
+      com `tls_provider=pure` na linha anterior).
+      O fork existe para tirar o `rustls-webpki 0.102` do grafo: o upstream só o usava pelas
+      constantes `alg_id`, que hoje moram no `rustls-pki-types` 1.14 (ver
+      `docs/experimento-tls-pure.md`).
+      `cargo tree -i ring` e `cargo tree -i aws-lc-sys`: **fora do grafo** — o ureq sobe com
+      `rustls-no-provider` (sem `_ring`) e o provider vai sempre explícito no `TlsConfig`.
       Teste real (`cargo test --test tls_update_check -- --ignored --nocapture`): o handshake com
       `api.github.com` negociou **TLSv1.3 + TLS13_AES_128_GCM_SHA256** e o `check_for_update`
-      achou a release **v0.3.0** (4 assets) — o provider puro funciona com o GitHub.
-      `cargo tree -i ring`: **o ring continua no grafo** (antes e depois; via `ureq/_ring` +
-      `rustls`), só deixou de ser o provider das requisições do update. Tirá-lo do grafo exige
-      abrir mão da válvula (ou trocá-la por native-tls/SChannel) — decisão do João.
-      Custo: +~20 crates (RustCrypto), `rustls-webpki 0.102.8` + `rsa 0.9` na árvore do provider;
-      o `cargo deny` passou a ignorar 5 advisories do webpki 0.102 e 2 do rsa/crypto-bigint, com
-      justificativa no `deny.toml` (o 0.102 entra só pelo tipo `alg_id`; a verificação de cadeia é
-      do webpki 0.103.16 + verificador do SO; o rsa só verifica assinatura pública, não decifra).
-      **Revisitar antes de um release**: ou o upstream migra para o webpki 0.103, ou o experimento
-      não vai para release. Fora do escopo por decisão: não estender aos outros apps da suíte.
+      achou a release **v0.4.0** (4 assets) — o provider puro funciona com o GitHub.
+      `cargo deny`: os 5 ignores do webpki 0.102 saíram; sobram 2, sem correção possível hoje
+      (`RUSTSEC-2023-0071` do `rsa`, `patched = []` também no 0.10-rc; `RUSTSEC-2026-0387` do
+      `crypto-bigint 0.5`, que o rsa 0.9 exige), justificados no `deny.toml` (o cliente só verifica
+      assinatura com chave pública, nunca opera chave privada). Custo: +~20 crates RustCrypto.
+      Fora do escopo por decisão: não estender aos outros apps da suíte.
 
 ## Pendências conhecidas
 
@@ -123,9 +124,10 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
   resize). Se o chrome mudar DEPOIS (linha de status da legenda, item novo na lista), o vídeo fica
   com uma borda de poucos px até a próxima faixa — perseguir o chrome por frame faria a janela
   "respirar" sozinha, então não.
-- **TLS do update** — ver a fase 11: provider puro sem fallback padrão, ring ainda no grafo
-  (`cargo tree -i ring`) e 7 advisories ignoradas no `deny.toml` com justificativa (webpki 0.102
-  só pelo tipo `alg_id`; rsa só verifica assinatura pública). Revisitar antes de release.
+- **TLS do update** — ver a fase 11: provider puro (fork vendored) sem fallback, `ring`/`aws-lc-sys`
+  fora do grafo e 2 advisories ignoradas no `deny.toml` (`RUSTSEC-2023-0071` do `rsa`, sem patch
+  nem no 0.10-rc; `RUSTSEC-2026-0387` do `crypto-bigint 0.5`, que só sai migrando para rsa 0.10).
+  Revisitar quando o upstream do `rustls-rustcrypto` migrar de `rsa`.
 
 ## Dívida técnica
 

@@ -28,10 +28,14 @@ eframe = { path = "libs/egui/crates/eframe/" }
 egui_demo_lib = { path = "libs/egui/crates/egui_demo_lib/" }
 egui_inspection = { path = "libs/egui/crates/egui_inspection/" }
 winit = { path = "libs/winit/" }
+# // local-player-rs: fork do rustls-rustcrypto (experimento TLS puro do updater).
+# O upstream 0.0.2-alpha puxa rustls-webpki 0.102 só pelas constantes `alg_id`;
+# o fork usa `rustls-pki-types` e some com os advisories (README no próprio fork).
+rustls-rustcrypto = { path = "libs/rustls-rustcrypto" }
 
 [package]
 name = "local-player-rs"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 publish = false
