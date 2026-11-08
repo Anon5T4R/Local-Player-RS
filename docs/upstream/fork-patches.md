@@ -208,6 +208,32 @@ Test: `leading_empty_edit_does_not_freeze_the_clip` muxes an AAC track with a
 that audio at t=0 is not the empty edit's silence.
 ```
 
+## Divergência 6 - teto de threads dos decoders e do pool do `gop` (`crates/codecs/src/{gop,lib}.rs` + `crates/{h264,hevc,vp9,av1}/src/decoder.rs`)
+
+**O que muda.** Um limite de threads configurável pelo processo host, em dois níveis:
+
+- `gop::set_decode_pool_threads(n)` (NOVO) — threads do pool que AGENDA o decode de cada cache
+  (`decode_pool`), que antes era sempre `available_parallelism`;
+- `codecs::set_decoder_threads(n)` (NOVO) — repassa para `set_threads_cap` de cada codec
+  (`filmcraft-h264/hevc/vp9/av1`), que passam a limitar o `default_threads()` dos pools
+  `h264-*`/`hevc-*`/`vp9-*`/`av1-*` (os que realmente decodificam em paralelo).
+
+`0` = comportamento original em todos. Testes: `gop::tests::a_host_thread_cap_shares_the_cpu` e
+`h264::decoder::cap_tests`.
+
+**Por quê.** O player divide a máquina com a UI, o áudio e o que mais estiver rodando (rustc,
+navegador, OBS). O primeiro diagnóstico (`available_parallelism` no pool do gop) estava
+incompleto — medido com `--bench --seconds 30 --hw off`, capar só aquele pool não mudava o fps;
+a paralelização de verdade está nos pools dos codecs. Com os dois capados (Ryzen 5 5500U,
+12 threads lógicas, MKV 1080p H.264): livre ~309 fps (auto) / 142 (2) / 70 (1); com 3 loops de CPU
+240 / 112; com 8 loops 166 / 68. O cap entrega CPU ao resto da máquina ao custo de folga de
+decode — para 1080p a 30 fps, 2 threads ainda sobram 4,7×.
+
+**Proposta de upstream (não submetida).** Hoje o upstream só tem controles globais para o cache
+de frames; o número de threads de cada decoder é `available_parallelism` fixo. O setter espelha
+`set_frame_cache_budget` (global, chamado no arranque, `0` = original). Uma alternativa melhor
+para o futuro é prioridade por thread (`spawn_handler`), que não existe no upstream.
+
 ## Fora do fork (nem divergência, nem patch)
 
 - **Prioridade da thread de decode.** O app baixa a prioridade da própria thread `video-decode`

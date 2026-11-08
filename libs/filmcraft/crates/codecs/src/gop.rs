@@ -286,6 +286,27 @@ pub fn set_frame_cache_budget(bytes: usize) {
     CACHE_BUDGET.store(bytes, Ordering::Relaxed);
 }
 
+/// // fork local-player-rs: threads for the caches' decode pool. `0` keeps the built-in
+/// auto-detection ([`std::thread::available_parallelism`], the upstream behaviour); a positive
+/// value caps it, so the player shares the CPU with its UI, the audio thread and whatever else
+/// the machine is running.
+static DECODE_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// // fork local-player-rs: cap the decode pool's threads. Call it before the first frame is
+/// decoded (the pool is built once, lazily); `0` = auto.
+pub fn set_decode_pool_threads(threads: usize) {
+    DECODE_THREADS.store(threads, Ordering::Relaxed);
+}
+
+/// // fork local-player-rs: threads the pool actually gets - the host cap when set (never above
+/// what the machine reports), auto otherwise.
+fn pool_threads(configured: usize, auto: usize) -> usize {
+    match configured {
+        0 => auto.max(1),
+        n => n.min(auto.max(1)),
+    }
+}
+
 /// // fork local-player-rs: the configured per-cache budget, `None` when unset.
 fn configured_budget() -> Option<usize> {
     match CACHE_BUDGET.load(Ordering::Relaxed) {
@@ -487,7 +508,9 @@ const CONTINUE_THROUGH: usize = 48;
 fn decode_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
-        let n = std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1);
+        let auto = std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(1);
+        // // fork local-player-rs: the host may cap the pool (`set_decode_pool_threads`).
+        let n = pool_threads(DECODE_THREADS.load(Ordering::Relaxed), auto);
         rayon::ThreadPoolBuilder::new().num_threads(n).thread_name(|i| format!("decode-{i}")).build().ok()
     })
     .as_ref()
@@ -1528,6 +1551,20 @@ mod tests {
         // The fork's own ceiling still wins over a larger host budget.
         c.budget = usize::MAX;
         assert_eq!(c.cache_budget(1), FRAME_CACHE_CEILING);
+    }
+
+    /// // fork local-player-rs: the host cap never exceeds the machine and 0
+    /// keeps the upstream auto-detection.
+    #[test]
+    fn a_host_thread_cap_shares_the_cpu() {
+        assert_eq!(pool_threads(0, 8), 8);
+        assert_eq!(pool_threads(2, 8), 2);
+        assert_eq!(pool_threads(1, 8), 1);
+        // Pedir mais do que a máquina tem não cria threads a mais.
+        assert_eq!(pool_threads(32, 8), 8);
+        // available_parallelism nunca devolve 0, mas o piso fica explícito.
+        assert_eq!(pool_threads(0, 0), 1);
+        assert_eq!(pool_threads(4, 0), 1);
     }
 
     #[test]

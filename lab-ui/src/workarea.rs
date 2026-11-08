@@ -65,11 +65,46 @@ pub fn work_area(ctx: &egui::Context) -> (egui::Vec2, egui::Pos2) {
     }
 }
 
+/// Tamanho INTERNO (points) para um conteúdo de `w_px`×`h_px` pixels: 1:1
+/// (1 ponto = `ppp` pixels) quando cabe, encolhido uniformemente quando não
+/// cabe — nunca maior que a área útil menos o chrome da janela. Math pura,
+/// testável sem `Context` (o `fit_to_work_area` abaixo é só a leitura do
+/// ambiente em volta dela).
+pub fn fit_size(avail: egui::Vec2, window_chrome: egui::Vec2, w_px: f32, h_px: f32, ppp: f32) -> egui::Vec2 {
+    fit_size_with_fixed_chrome(avail, window_chrome, w_px, h_px, 0.0, ppp)
+}
+
+/// Como [`fit_size`], mas `fixed_chrome_px` é o chrome INTERNO do app (barras
+/// que não escalam junto com o conteúdo): ele sai da área útil ANTES do fator
+/// de encolhimento, então a janela continua "abraçando" o conteúdo em 1:1 na
+/// maior escala que cabe.
+///
+/// A ordem importa: encolher o chrome junto faria a janela ficar mais larga
+/// que o conteúdo (letterbox de sobra) quando o cap vem da altura.
+pub fn fit_size_with_fixed_chrome(avail: egui::Vec2, window_chrome: egui::Vec2, w_px: f32, h_px: f32, fixed_chrome_px: f32, ppp: f32) -> egui::Vec2 {
+    let ppp = if ppp.is_finite() && ppp > 0.0 { ppp } else { 1.0 };
+    let w = (w_px / ppp).max(1.0);
+    let h = (h_px / ppp).max(1.0);
+    let fixed = if fixed_chrome_px.is_finite() { (fixed_chrome_px / ppp).max(0.0) } else { 0.0 };
+    // Espaço que sobra para o conteúdo depois do chrome (nunca <= 0: com
+    // chrome maior que a tela o resultado é o mínimo de 1 ponto, não negativo).
+    let room = egui::vec2((avail.x - window_chrome.x).max(1.0), (avail.y - window_chrome.y).max(1.0));
+    let s = (room.x / w).min((room.y - fixed).max(1.0) / h).min(1.0);
+    egui::vec2((w * s).max(1.0), (h * s + fixed).max(1.0))
+}
+
 /// Converte o tamanho de conteúdo (px) em (`InnerSize`, `OuterPosition`)
 /// de viewport: points com clamp na área útil e posição centrada. O chrome
 /// da janela (bordas+title bar, outer−inner do viewport real) entra na
 /// conta — o OUTER inteiro cabe, title bar não invade a taskbar.
 pub fn fit_to_work_area(ctx: &egui::Context, w_px: f32, h_px: f32) -> (egui::Vec2, egui::Pos2) {
+    fit_to_work_area_with_chrome(ctx, w_px, h_px, 0.0)
+}
+
+/// [`fit_to_work_area`] com o chrome INTERNO do app (topo/controles/lista) em
+/// pixels: ele não escala com o conteúdo, então a janela abraça o vídeo em 1:1
+/// na maior escala que cabe na tela.
+pub fn fit_to_work_area_with_chrome(ctx: &egui::Context, w_px: f32, h_px: f32, fixed_chrome_px: f32) -> (egui::Vec2, egui::Pos2) {
     let ppp = ctx.pixels_per_point();
     let (avail, origin) = work_area(ctx);
     let (cx, cy) = ctx.input(|i| {
@@ -79,13 +114,104 @@ pub fn fit_to_work_area(ctx: &egui::Context, w_px: f32, h_px: f32) -> (egui::Vec
             _ => (0.0, 40.0),
         }
     });
-    let mut w = w_px / ppp;
-    let mut h = h_px / ppp;
-    let s = ((avail.x - cx) / w).min((avail.y - cy) / h);
-    if s < 1.0 {
-        w *= s;
-        h *= s;
+    let size = fit_size_with_fixed_chrome(avail, egui::vec2(cx, cy), w_px, h_px, fixed_chrome_px, ppp);
+    let pos = egui::pos2(origin.x + (avail.x - (size.x + cx)) / 2.0, origin.y + (avail.y - (size.y + cy)) / 2.0);
+    (size, pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_size;
+    use egui::vec2;
+
+    /// 1080p, 1080p de área útil: 1:1 exato, sem encolher.
+    #[test]
+    fn a_video_that_fits_keeps_its_pixels() {
+        let size = fit_size(vec2(2560.0, 1400.0), vec2(0.0, 40.0), 1920.0, 1080.0, 1.0);
+        assert_eq!(size, vec2(1920.0, 1080.0));
     }
-    let pos = egui::pos2(origin.x + (avail.x - (w + cx)) / 2.0, origin.y + (avail.y - (h + cy)) / 2.0);
-    (egui::vec2(w, h), pos)
+
+    /// Escala do Windows a 150%: os pixels do vídeo continuam sendo pixels da
+    /// TELA, então o tamanho em points divide por `pixels_per_point`.
+    #[test]
+    fn scaling_converts_pixels_to_points() {
+        let size = fit_size(vec2(2560.0, 1400.0), vec2(0.0, 40.0), 1920.0, 1080.0, 1.5);
+        assert_eq!(size, vec2(1280.0, 720.0));
+    }
+
+    /// Vídeo 4K num monitor 1080p: cai no maior que cabe (uniforme, nunca
+    /// maior que a área útil) em vez de abrir uma janela fora da tela.
+    #[test]
+    fn a_video_larger_than_the_screen_is_capped() {
+        let avail = vec2(1920.0, 1040.0);
+        let chrome = vec2(0.0, 40.0);
+        let size = fit_size(avail, chrome, 3840.0, 2160.0, 1.0);
+        assert!(size.x <= avail.x, "{size:?}");
+        assert!(size.y <= avail.y - chrome.y, "{size:?}");
+        // Mesma proporção 16:9 do vídeo.
+        assert!((size.x / size.y - 16.0 / 9.0).abs() < 0.01, "{size:?}");
+        // E o maior possível: encostado na altura útil.
+        assert!((size.y - (avail.y - chrome.y)).abs() < 0.5, "{size:?}");
+    }
+
+    /// A largura também limita (tela retrato / janela estreita).
+    #[test]
+    fn the_narrow_side_caps_the_size() {
+        let size = fit_size(vec2(1000.0, 2000.0), vec2(0.0, 40.0), 1920.0, 1080.0, 1.0);
+        assert!((size.x - 1000.0).abs() < 0.5, "{size:?}");
+        assert!(size.y < 2000.0, "{size:?}");
+    }
+
+    /// Chrome maior que a própria área útil (taskbar gigante, tela minúscula):
+    /// nunca negativo nem zero (o egui não aceita tamanho inválido).
+    #[test]
+    fn a_huge_chrome_never_yields_a_negative_size() {
+        let size = fit_size(vec2(100.0, 100.0), vec2(200.0, 200.0), 1920.0, 1080.0, 1.0);
+        assert!(size.x >= 1.0 && size.y >= 1.0, "{size:?}");
+    }
+
+    /// Conteúdo inválido (0 px, NaN ou ppp 0) não vira tamanho inválido.
+    #[test]
+    fn degenerate_input_is_kept_usable() {
+        for (w, h, ppp) in [(0.0, 0.0, 1.0), (f32::NAN, f32::NAN, 1.0), (100.0, 100.0, 0.0)] {
+            let size = fit_size(vec2(800.0, 600.0), vec2(0.0, 40.0), w, h, ppp);
+            assert!(size.x.is_finite() && size.x >= 1.0, "{size:?}");
+            assert!(size.y.is_finite() && size.y >= 1.0, "{size:?}");
+        }
+    }
+
+    /// O chrome interno do app NÃO encolhe com o vídeo: num monitor 1080p um
+    /// vídeo 1080p + 200 px de barras fica na maior escala que cabe, e a janela
+    /// abraça o vídeo (sem letterbox de sobra nas laterais).
+    #[test]
+    fn the_app_chrome_is_not_scaled_away() {
+        use super::fit_size_with_fixed_chrome;
+        let chrome = 200.0;
+        let avail = vec2(1920.0, 1080.0);
+        let win_chrome = vec2(16.0, 40.0);
+        let size = fit_size_with_fixed_chrome(avail, win_chrome, 1920.0, 1080.0, chrome, 1.0);
+        // Vídeo + barras preenche exatamente a altura útil.
+        assert!((size.y + win_chrome.y - avail.y).abs() < 0.5, "{size:?}");
+        // A área do vídeo continua 16:9 (a janela não sobra nas laterais).
+        let video_h = size.y - chrome;
+        assert!((size.x / video_h - 1920.0 / 1080.0).abs() < 0.01, "{size:?}");
+        // E a largura não passa do espaço lateral.
+        assert!(size.x + win_chrome.x <= avail.x + 0.5, "{size:?}");
+    }
+
+    /// Sem cap (vídeo pequeno) o chrome só SOMA na altura.
+    #[test]
+    fn a_small_video_keeps_its_pixels_and_adds_the_chrome() {
+        use super::fit_size_with_fixed_chrome;
+        let size = fit_size_with_fixed_chrome(vec2(1920.0, 1080.0), vec2(16.0, 40.0), 800.0, 450.0, 120.0, 1.0);
+        assert_eq!(size, vec2(800.0, 570.0));
+    }
+
+    /// Chrome interno maior que a própria tela: ainda devolve tamanho válido.
+    #[test]
+    fn a_chrome_bigger_than_the_screen_is_not_negative() {
+        use super::fit_size_with_fixed_chrome;
+        let size = fit_size_with_fixed_chrome(vec2(800.0, 600.0), vec2(0.0, 40.0), 1920.0, 1080.0, 900.0, 1.0);
+        assert!(size.x >= 1.0 && size.y >= 1.0 && size.x.is_finite() && size.y.is_finite(), "{size:?}");
+    }
 }

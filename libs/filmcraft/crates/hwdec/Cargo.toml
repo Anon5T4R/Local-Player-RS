@@ -1,17 +1,18 @@
 [package]
 name = "filmcraft-hwdec"
-description = "OS hardware video decoding for players: Media Foundation / DXVA on Windows, with a transparent fallback to the pure-Rust decoders. Extracted from FilmCraft's filmcraft-platform (the editor's project/render/export dependencies are not pulled in)."
+description = "OS hardware video decoding for players: Media Foundation / DXVA on Windows and VA-API / NVDEC on Linux, with a transparent fallback to the pure-Rust decoders. Extracted from FilmCraft's filmcraft-platform (the editor's project/render/export dependencies are not pulled in)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# Fork local-player-rs: this is `filmcraft-platform`'s Windows video decoder and the pieces it
-# needs (Annex B conversion, biplanar readback, the hybrid software fallback), nothing else — no
-# encoders (NVENC/VideoToolbox), no VA-API/NVDEC yet, and none of the editor crates the upstream
-# platform depends on (project, render, export, engine). `unsafe_code` is allowed only in the FFI
-# modules (`media_foundation::{gpu,mft}`), each `unsafe` block with a `// SAFETY:` comment, as
-# upstream does (storytold/filmcraft docs/adr/0001-platform-ffi.md).
+# Fork local-player-rs: this is `filmcraft-platform`'s video decoders and the pieces they need
+# (Annex B conversion, biplanar readback, the hybrid software fallback, and for Linux the CUDA
+# context NVDEC maps through) — no encoders (NVENC/VideoToolbox) and none of the editor crates the
+# upstream platform depends on (project, render, export, engine). `unsafe_code` is allowed only in
+# the FFI modules (`media_foundation::{gpu,mft}`, `vaapi::{ffi,va}`, `nvdec::{cuvid,ffi,device}`),
+# each `unsafe` block with a `// SAFETY:` comment, as upstream does
+# (storytold/filmcraft docs/adr/0001-platform-ffi.md).
 [lints.rust]
 unsafe_code = "deny"
 
@@ -24,9 +25,12 @@ type_complexity = "allow"
 undocumented_unsafe_blocks = "deny"
 
 [dependencies]
+filmcraft-bitstream = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-frame = { workspace = true }
+filmcraft-h264 = { workspace = true }
+filmcraft-hevc = { workspace = true }
 filmcraft-isobmff = { workspace = true }
 filmcraft-time = { workspace = true }
 log = { workspace = true }
@@ -46,3 +50,14 @@ windows = { version = "0.62", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Linux: libva, libva-drm, libnvcuvid and libcuda are loaded at run time with libloading (ISC;
+# already in the lockfile through wgpu), so building needs no libva/CUDA headers and a system
+# without them simply decodes in software.
+[target.'cfg(target_os = "linux")'.dependencies]
+libloading = "0.8"
+
+[dev-dependencies]
+# Fork local-player-rs: ffmpeg fixtures for the VA-API front-end tests (they skip when ffmpeg is
+# not installed). Internal path crate, already vendored in this workspace.
+filmcraft-testkit = { workspace = true }

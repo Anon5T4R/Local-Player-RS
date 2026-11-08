@@ -2,9 +2,11 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::protocol::{CANCELLED, PAUSED};
+use crate::tls;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -30,6 +32,17 @@ pub enum Fetched {
 
 #[derive(Clone)]
 pub struct Http {
+    /// Agents com o provider puro (`rustls-rustcrypto`) — o caminho único.
+    pure: Agents,
+    /// Os mesmos agents com o provider padrão do ureq (ring): só entram com a
+    /// válvula de emergência `LOCALPLAYER_TLS_FALLBACK=1` (`tls::note_fallback`).
+    standard: Agents,
+    token: Option<String>,
+}
+
+/// Os seis agentes de uma configuração de TLS, com os mesmos timeouts/proxy.
+#[derive(Clone)]
+struct Agents {
     small: ureq::Agent,
     /// ArtCraft's release feed: a short timeout, so a slow server never holds up a check.
     feed: ureq::Agent,
@@ -37,7 +50,6 @@ pub struct Http {
     download: ureq::Agent,
     direct: ureq::Agent,
     direct_download: ureq::Agent,
-    token: Option<String>,
 }
 
 /// Why ArtCraft's release feed couldn't be read.
@@ -59,6 +71,69 @@ pub fn is_loopback(url: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "[::1]") && !port.is_empty() && port.parse::<u16>().is_ok()
 }
 
+/// Os seis agentes de uma configuração de TLS (mesmos timeouts/proxy dos dois
+/// providers; muda só o `CryptoProvider` que o ureq recebe).
+fn agents(user_agent: &str, tls: ureq::tls::TlsConfig, proxy: Option<ureq::Proxy>) -> Agents {
+    let small = ureq::Agent::config_builder()
+        .tls_config(tls.clone())
+        .proxy(proxy.clone())
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    let feed = ureq::Agent::config_builder()
+        .tls_config(tls.clone())
+        .proxy(proxy.clone())
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_global(Some(Duration::from_secs(10)))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    let no_redirect = ureq::Agent::config_builder()
+        .tls_config(tls.clone())
+        .proxy(proxy.clone())
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .max_redirects_will_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    let download = ureq::Agent::config_builder()
+        .tls_config(tls.clone())
+        .proxy(proxy.clone())
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        // ureq has no idle timeout: cap each attempt instead, and resume where it stopped.
+        .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    let direct = ureq::Agent::config_builder()
+        .proxy(None)
+        .tls_config(tls.clone())
+        .timeout_connect(Some(Duration::from_secs(5)))
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    let direct_download = ureq::Agent::config_builder()
+        .proxy(None)
+        .tls_config(tls)
+        .timeout_connect(Some(Duration::from_secs(20)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
+        .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
+        .http_status_as_error(false)
+        .user_agent(user_agent)
+        .build()
+        .new_agent();
+    Agents { small, feed, no_redirect, download, direct, direct_download }
+}
+
 impl Http {
     /// `user_agent` names the product and its version (`PhotoCraft/0.9.0`) and nothing about the
     /// person using it.
@@ -66,67 +141,41 @@ impl Http {
         // The OS checks each certificate chain itself: Windows fetches roots it hasn't stored yet
         // and trusts what antivirus HTTPS scanning installs. Reading the store ourselves missed
         // both ("invalid peer certificate: UnknownIssuer").
-        let tls = || ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+        // // local-player-rs: o provider puro (rustls-rustcrypto) é o padrão; o MESMO conjunto
+        // de agentes é construído com o provider padrão do ureq (ring) para o fallback.
+        let tls_for = |crypto: Option<&Arc<rustls::crypto::CryptoProvider>>| {
+            let mut builder = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier);
+            if let Some(crypto) = crypto {
+                builder = builder.unversioned_rustls_crypto_provider(Arc::clone(crypto));
+            }
+            builder.build()
+        };
         // Chosen once: the proxy environment variables, else the OS proxy setting.
         let proxy = crate::proxy::pick();
-        let small = ureq::Agent::config_builder()
-            .tls_config(tls())
-            .proxy(proxy.clone())
-            .timeout_global(Some(Duration::from_secs(20)))
-            .http_status_as_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        let feed = ureq::Agent::config_builder()
-            .tls_config(tls())
-            .proxy(proxy.clone())
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_global(Some(Duration::from_secs(10)))
-            .http_status_as_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        let no_redirect = ureq::Agent::config_builder()
-            .tls_config(tls())
-            .proxy(proxy.clone())
-            .timeout_global(Some(Duration::from_secs(20)))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .max_redirects_will_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        let download = ureq::Agent::config_builder()
-            .tls_config(tls())
-            .proxy(proxy.clone())
-            .timeout_connect(Some(Duration::from_secs(20)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            // ureq has no idle timeout: cap each attempt instead, and resume where it stopped.
-            .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
-            .http_status_as_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        let direct = ureq::Agent::config_builder()
-            .proxy(None)
-            .tls_config(tls())
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_global(Some(Duration::from_secs(20)))
-            .http_status_as_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        let direct_download = ureq::Agent::config_builder()
-            .proxy(None)
-            .tls_config(tls())
-            .timeout_connect(Some(Duration::from_secs(20)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .timeout_recv_body(Some(ATTEMPT_BODY_TIME))
-            .http_status_as_error(false)
-            .user_agent(user_agent)
-            .build()
-            .new_agent();
-        Ok(Self { small, feed, no_redirect, download, direct, direct_download, token: None })
+        let pure_crypto = tls::pure_provider();
+        let pure = agents(user_agent, tls_for(Some(&pure_crypto)), proxy.clone());
+        let standard = agents(user_agent, tls_for(None), proxy);
+        Ok(Self { pure, standard, token: None })
+    }
+
+    /// O conjunto de agentes do provider em uso agora.
+    fn active(&self) -> &Agents {
+        if tls::is_pure() { &self.pure } else { &self.standard }
+    }
+
+    /// Roda `op` com o provider ativo. Com a válvula de emergência
+    /// (`LOCALPLAYER_TLS_FALLBACK=1`) uma falha de handshake/transporte no
+    /// provider puro é repetida UMA vez no padrão (ring) e registrada; sem a
+    /// válvula o erro sobe como qualquer outro (o app mostra na linha de status
+    /// e o log de sessão registra `tls_provider=pure`).
+    fn with_agents<T>(&self, op: impl Fn(&Agents) -> Result<T, ureq::Error>) -> Result<T, ureq::Error> {
+        match op(self.active()) {
+            Err(e) if tls::may_fallback(&e) => {
+                tls::note_fallback(&e);
+                op(&self.standard)
+            }
+            other => other,
+        }
     }
 
     /// An optional token raises GitHub's limit from 60 to 5000 requests an hour. Only ever sent
@@ -139,16 +188,20 @@ impl Http {
 
     /// GET a GitHub API resource, revalidating with `etag` when given.
     pub fn get_api(&self, url: &str, etag: Option<&str>) -> Result<Fetched, String> {
-        let mut req = self.small.get(url).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(tag) = etag {
-            req = req.header("If-None-Match", tag);
-        }
-        if let Some(token) = &self.token
-            && url.starts_with("https://api.github.com/")
-        {
-            req = req.header("Authorization", &format!("Bearer {token}"));
-        }
-        let mut resp = req.call().map_err(|e| format!("couldn't reach GitHub ({e})"))?;
+        let mut resp = self
+            .with_agents(|a| {
+                let mut req = a.small.get(url).header("Accept", "application/vnd.github+json").header("X-GitHub-Api-Version", "2022-11-28");
+                if let Some(tag) = etag {
+                    req = req.header("If-None-Match", tag);
+                }
+                if let Some(token) = &self.token
+                    && url.starts_with("https://api.github.com/")
+                {
+                    req = req.header("Authorization", &format!("Bearer {token}"));
+                }
+                req.call()
+            })
+            .map_err(|e| format!("couldn't reach GitHub ({e})"))?;
         let header = |name: &str| resp.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
         let status = resp.status().as_u16();
         match status {
@@ -175,9 +228,12 @@ impl Http {
     /// ArtCraft's release feed, or why it couldn't be read. Never takes more than ~10 seconds.
     pub fn get_feed(&self, url: &str) -> Result<String, FeedError> {
         let failed = |why: String| FeedError { why, throttled: false, retry_after: None };
-        let agent = if is_loopback(url) { &self.direct } else { &self.feed };
-        let mut resp =
-            agent.get(url).header("Accept", "application/json").call().map_err(|e| failed(format!("couldn't reach {} ({e})", host(url))))?;
+        let mut resp = self
+            .with_agents(|a| {
+                let agent = if is_loopback(url) { &a.direct } else { &a.feed };
+                agent.get(url).header("Accept", "application/json").call()
+            })
+            .map_err(|e| failed(format!("couldn't reach {} ({e})", host(url))))?;
         // Seconds only; an HTTP date falls back to our own backoff.
         let retry_after = resp.headers().get("retry-after").and_then(|v| v.to_str().ok()).and_then(|r| r.trim().parse::<i64>().ok());
         match resp.status().as_u16() {
@@ -188,8 +244,12 @@ impl Http {
 
     /// GET a small text file (following redirects).
     pub fn get_text(&self, url: &str) -> Result<Option<String>, String> {
-        let agent = if is_loopback(url) { &self.direct } else { &self.small };
-        let mut resp = agent.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let mut resp = self
+            .with_agents(|a| {
+                let agent = if is_loopback(url) { &a.direct } else { &a.small };
+                agent.get(url).call()
+            })
+            .map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             200 => read_text_capped(&mut resp, MAX_SMALL).map(Some).map_err(|e| format!("unreadable answer ({e})")),
             404 => Ok(None),
@@ -201,8 +261,12 @@ impl Http {
     /// `max` bytes is refused: by its announced length before a byte is read, and by a hard limit
     /// on the body when the length wasn't announced or was wrong.
     pub fn get_bytes(&self, url: &str, max: usize) -> Result<Option<Vec<u8>>, String> {
-        let agent = if is_loopback(url) { &self.direct } else { &self.small };
-        let mut resp = agent.get(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let mut resp = self
+            .with_agents(|a| {
+                let agent = if is_loopback(url) { &a.direct } else { &a.small };
+                agent.get(url).call()
+            })
+            .map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             200 => {
                 let announced = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
@@ -221,7 +285,7 @@ impl Http {
 
     /// Where `url` redirects to, without following it.
     pub fn redirect_target(&self, url: &str) -> Result<Option<String>, String> {
-        let resp = self.no_redirect.head(url).call().map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
+        let resp = self.with_agents(|a| a.no_redirect.head(url).call()).map_err(|e| format!("couldn't reach {} ({e})", host(url)))?;
         match resp.status().as_u16() {
             300..=399 => Ok(resp.headers().get("location").and_then(|v| v.to_str().ok()).map(str::to_string)),
             404 => Ok(None),
@@ -327,12 +391,14 @@ impl Http {
     fn attempt(&self, url: &str, part: &Path, have: u64, size: u64, stop: &Stop, progress: &mut dyn FnMut(Transfer)) -> Result<(), AttemptError> {
         let retry = |error: String, progressed: bool| AttemptError::Retry { error, progressed };
         // Binaries are already compressed; ask for the bytes exactly as published.
-        let agent = if is_loopback(url) { &self.direct_download } else { &self.download };
-        let mut req = agent.get(url).header("Accept-Encoding", "identity");
-        if have > 0 {
-            req = req.header("Range", &format!("bytes={have}-"));
-        }
-        let mut resp = match req.call() {
+        let mut resp = match self.with_agents(|a| {
+            let agent = if is_loopback(url) { &a.direct_download } else { &a.download };
+            let mut req = agent.get(url).header("Accept-Encoding", "identity");
+            if have > 0 {
+                req = req.header("Range", &format!("bytes={have}-"));
+            }
+            req.call()
+        }) {
             Ok(r) => r,
             Err(e) => return Err(retry(format!("couldn't connect: {e}"), false)),
         };

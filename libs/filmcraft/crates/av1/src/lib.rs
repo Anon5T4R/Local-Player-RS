@@ -28,7 +28,7 @@ mod symbol;
 mod tile;
 mod transform;
 
-pub use decoder::Decoder;
+pub use decoder::{Decoder, set_threads_cap};
 pub use header::{ColorConfig, FrameHeader, SequenceHeader};
 pub use stats::{DecodeStats, Stage};
 

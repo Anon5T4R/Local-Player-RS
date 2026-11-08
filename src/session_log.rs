@@ -68,6 +68,9 @@ struct State {
     rss_high: bool,
     /// Modo de hwdec já registrado para a faixa (uma linha por modo).
     hw_logged: Option<HwMode>,
+    /// Linha do provider TLS do update, esperando a primeira escrita (uma por
+    /// execução; execução sem playback não cria log).
+    pending_tls: Option<String>,
 }
 
 /// Escritor do log de sessão (compartilhado por referência; só a UI escreve).
@@ -234,6 +237,39 @@ impl SessionLog {
         write_line(&mut st, &line);
     }
 
+    /// Provider TLS do update (`tls_provider=pure` ou `fallback(motivo)`).
+    ///
+    /// O puro é o normal: fica pendente e sai antes da primeira linha da
+    /// sessão, para uma execução sem playback não criar log. Uma troca para o
+    /// provider padrão é anomalia (o update podia ter falhado sem ela) e abre o
+    /// log na hora.
+    pub fn tls(&self, line: &str) {
+        let mut st = self.lock();
+        if line.starts_with("tls_provider=pure") {
+            st.pending_tls = Some(line.to_string());
+        } else {
+            st.pending_tls = None;
+            write_line(&mut st, line);
+        }
+    }
+
+    /// Check de update pedido pelo usuário começou. A linha pendente do provider
+    /// TLS (`tls_provider=...`) sai antes desta — é o jeito de ver o provider em
+    /// uso no log sem depender de tocar uma faixa.
+    pub fn update_check_started(&self) {
+        let mut st = self.lock();
+        write_line(&mut st, "event=update_check start");
+    }
+
+    /// Check de update pedido pelo usuário falhou. A linha pendente do provider
+    /// TLS (`tls_provider=...`) sai antes desta, então uma falha de handshake
+    /// com o provider puro deixa o rastro completo no log.
+    pub fn update_check_failed(&self, detail: &str) {
+        let mut st = self.lock();
+        let line = format!("event=update_check_failed detail=\"{}\"", escape(detail));
+        write_line(&mut st, &line);
+    }
+
     /// Fecha a sessão (fim normal do app). Sem playback no run, não cria arquivo.
     pub fn end(&self) {
         let mut st = self.lock();
@@ -258,6 +294,7 @@ impl State {
             last_rss_log: None,
             rss_high: false,
             hw_logged: None,
+            pending_tls: None,
         }
     }
 
@@ -287,8 +324,15 @@ fn close_stall(st: &mut State, reason: &str) {
 }
 
 /// Escreve uma linha com timestamp UTC; abre o arquivo (e roda a rotação) na
-/// primeira escrita.
+/// primeira escrita. A linha pendente do provider TLS (se houver) sai antes.
 fn write_line(st: &mut State, text: &str) {
+    if let Some(tls) = st.pending_tls.take() {
+        write_raw(st, &tls);
+    }
+    write_raw(st, text);
+}
+
+fn write_raw(st: &mut State, text: &str) {
     if st.file.is_none() {
         let Some(dir) = st.dir.clone() else { return };
         if let Err(e) = std::fs::create_dir_all(&dir) {

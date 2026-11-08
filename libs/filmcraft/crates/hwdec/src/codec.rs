@@ -6,7 +6,8 @@
 //! player unit-test it on any machine (no GPU, no Windows) and lets `--probe` say "provável"
 //! before any device is touched.
 
-/// The codec families the Windows backend (Media Foundation / DXVA) decodes in hardware.
+/// The codec families the OS backends know: Media Foundation / DXVA (Windows) decodes all four;
+/// VA-API and NVDEC (Linux) decode H.264 and HEVC (see [`linux_supported`]).
 ///
 /// Mapped from the hub's display labels (`H.264 (High)`, `HEVC`, `VP9 (Profile 0)`, `AV1 (Main
 /// Profile)`), which is what `--probe` has without the container's sample entry.
@@ -78,8 +79,9 @@ pub fn bit_depth(pixel_format: &str) -> u32 {
     8
 }
 
-/// Whether the backend has a decoder for the family at that depth. The GPU, the DXVA profile and
-/// the decoder MFT still get the final say, per stream.
+/// Whether the Windows backend has a decoder for the family at that depth. The GPU, the DXVA
+/// profile and the decoder MFT still get the final say, per stream; on Linux see
+/// [`linux_supported`].
 pub fn supported(codec: Codec, bits: u32) -> bool {
     match codec {
         // DXVA H.264 decoders are 8-bit (Baseline / Main / High); Hi10 and 4:2:2 / 4:4:4 are not.
@@ -87,6 +89,51 @@ pub fn supported(codec: Codec, bits: u32) -> bool {
         Codec::Hevc => matches!(bits, 8 | 10),
         Codec::Vp9 => matches!(bits, 8 | 10),
         Codec::Av1 => matches!(bits, 8 | 10),
+    }
+}
+
+/// Whether the Linux backends (VA-API and NVDEC) decode the family at that depth. Both take
+/// H.264 8-bit and HEVC 8- / 10-bit 4:2:0 only; VP9 and AV1 are the Windows backend's.
+///
+/// Fork local-player-rs: upstream has no pure decision (it asks a decoder), and the player needs
+/// one the `--probe` diagnostic can answer from the hub's label on any machine.
+pub fn linux_supported(codec: Codec, bits: u32) -> bool {
+    matches!(codec, Codec::H264 | Codec::Hevc) && supported(codec, bits)
+}
+
+/// Whether this build's backend decodes the family at any depth (H.264 and HEVC on Linux; the
+/// four families on Windows). The overlay's "the decoder should take this stream" line only has
+/// the codec label, and the per-stream profile / bit depth still get the final say.
+pub fn taken(label: &str) -> bool {
+    match family(label) {
+        Some(codec) => platform_takes(codec),
+        None => false,
+    }
+}
+
+/// Whether this platform's hardware decoder covers the family (see [`taken`]).
+pub fn platform_takes(codec: Codec) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(codec, Codec::H264 | Codec::Hevc)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = codec;
+        true
+    }
+}
+
+/// Whether this platform's hardware decoder takes the family at that depth: the Linux backends'
+/// narrower set ([`linux_supported`]) or the Windows backend's ([`supported`]).
+pub fn platform_supported(codec: Codec, bits: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        linux_supported(codec, bits)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        supported(codec, bits)
     }
 }
 
@@ -98,14 +145,14 @@ pub enum Choice {
 }
 
 /// The choice for one stream: hardware only when the setting is on, a backend was registered, and
-/// the stream's family and bit depth are ones the backend takes. Pure so the matrix is unit-tested;
-/// [`crate::probe`] adds the GPU/MFT checks a diagnostic can afford.
+/// the stream's family and bit depth are ones this platform's backend takes. Pure so the matrix is
+/// unit-tested; [`crate::probe`] adds the driver/GPU checks a diagnostic can afford.
 pub fn choose(label: &str, bits: u32, hardware_decoding: bool, registered: bool) -> Choice {
     if !hardware_decoding || !registered {
         return Choice::Software;
     }
     match family(label) {
-        Some(codec) if supported(codec, bits) => Choice::Hardware,
+        Some(codec) if platform_supported(codec, bits) => Choice::Hardware,
         _ => Choice::Software,
     }
 }
@@ -164,5 +211,43 @@ mod tests {
         // the player's 1080p case: hardware.
         assert_eq!(choose("H.264 (High)", 8, true, true), Choice::Hardware);
         assert_eq!(choose("HEVC", 10, true, true), Choice::Hardware);
+        // the families differ per platform: VP9 belongs to the Windows backend.
+        #[cfg(target_os = "linux")]
+        assert_eq!(choose("VP9 (Profile 0)", 8, true, true), Choice::Software);
+        #[cfg(not(target_os = "linux"))]
+        assert_eq!(choose("VP9 (Profile 0)", 8, true, true), Choice::Hardware);
+    }
+
+    /// The Linux matrix, pure and on every host: H.264 8-bit and HEVC 8- / 10-bit only.
+    #[test]
+    fn linux_takes_h264_and_hevc_only() {
+        assert!(linux_supported(Codec::H264, 8));
+        assert!(!linux_supported(Codec::H264, 10), "VA-API and NVDEC are 8-bit H.264 here");
+        assert!(linux_supported(Codec::Hevc, 8));
+        assert!(linux_supported(Codec::Hevc, 10));
+        assert!(!linux_supported(Codec::Hevc, 12));
+        assert!(!linux_supported(Codec::Vp9, 8), "VP9 belongs to the Windows backend");
+        assert!(!linux_supported(Codec::Av1, 10), "AV1 belongs to the Windows backend");
+    }
+
+    /// The overlay's label-only verdict follows the platform's families.
+    #[test]
+    fn taken_follows_the_platform_families() {
+        assert!(!taken("Apple ProRes"));
+        assert!(!taken(""));
+        assert!(taken("H.264 (High)"));
+        assert!(taken("HEVC"));
+        // A platform without a Linux backend keeps the four families (Windows): the overlay still
+        // needs the backend registered before it draws a hardware line, which `hw_mode` checks.
+        #[cfg(target_os = "linux")]
+        {
+            assert!(!taken("VP9 (Profile 0)"));
+            assert!(!taken("AV1 (Main Profile)"));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(taken("VP9 (Profile 0)"));
+            assert!(taken("AV1 (Main Profile)"));
+        }
     }
 }

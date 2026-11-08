@@ -99,14 +99,36 @@ impl Default for Decoder {
     }
 }
 
+/// // fork local-player-rs: host cap on this decoder's worker threads (`0` = the
+/// auto-detected count, the upstream behaviour).
+static THREAD_CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// // fork local-player-rs: cap the worker threads of the decoders created from now on.
+pub fn set_threads_cap(threads: usize) {
+    THREAD_CAP.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// // fork local-player-rs: `n` under the configured cap.
+fn capped_by(configured: usize, n: usize) -> usize {
+    let n = n.max(1);
+    match configured {
+        0 => n,
+        cap => n.min(cap.max(1)),
+    }
+}
+
+fn capped(n: usize) -> usize {
+    capped_by(THREAD_CAP.load(std::sync::atomic::Ordering::Relaxed), n)
+}
+
 fn default_threads() -> usize {
     #[cfg(all(feature = "threads", not(target_arch = "wasm32")))]
     {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16)
+        capped(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16))
     }
     #[cfg(not(all(feature = "threads", not(target_arch = "wasm32"))))]
     {
-        1
+        capped(1)
     }
 }
 

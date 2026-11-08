@@ -1,8 +1,8 @@
 //! Tarefas de build/CI do Local Player RS (padrão local-office, versão mínima).
 //!
 //! - `cargo xtask version X.Y.Z` — bump atômico: Cargo.toml do app + lab-ui +
-//!   `!define VERSION` do installer.nsi + refresh do Cargo.lock.
-//! - `cargo xtask check` — confere que as 3 versões estão sincronizadas.
+//!   `refresh do Cargo.lock.
+//! - `cargo xtask check` — confere que as 2 versões estão sincronizadas.
 //!
 //! Zero dependências: manipulação de texto com std só (política de deps).
 
@@ -23,11 +23,7 @@ fn main() {
 
 /// (arquivo, prefixo da linha de versão)
 fn version_slots() -> Vec<(String, String)> {
-    vec![
-        ("Cargo.toml".into(), "version = ".into()),
-        ("lab-ui/Cargo.toml".into(), "version = ".into()),
-        ("packaging/windows/installer.nsi".into(), "!define VERSION ".into()),
-    ]
+    vec![("Cargo.toml".into(), "version = ".into()), ("lab-ui/Cargo.toml".into(), "version = ".into())]
 }
 
 fn read_version(path: &str, prefix: &str) -> String {

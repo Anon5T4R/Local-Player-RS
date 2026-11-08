@@ -27,8 +27,9 @@ processo externo de playback.
   - `craft-libs/` — tema/i18n/update e `craft-media`/`craft-docpath`
   - `filmcraft/` — workspace próprio (`libs/filmcraft/Cargo.toml`) com os crates
     de container/codec do FilmCraft usados pelo motor; `crates/hwdec`
-    (`filmcraft-hwdec`) é o recorte do `filmcraft-platform` do upstream: decoder de
-    hardware do Windows (Media Foundation/DXVA) com fallback SW transparente
+    (`filmcraft-hwdec`) é o recorte do `filmcraft-platform` do upstream: decoders de
+    hardware do Windows (Media Foundation/DXVA) e do Linux (VA-API/NVDEC) com
+    fallback SW transparente
 - `packaging/windows/package.ps1` + `local-player-rs.wxs` — MSI per-machine (WiX v5,
   Program Files\Local Player RS) e portable zip; `installer.nsi` é legado, sem uso no CI
 - `packaging/linux/local-player-rs.desktop` — desktop entry

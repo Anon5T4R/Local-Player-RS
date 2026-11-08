@@ -77,6 +77,10 @@ fn main() -> eframe::Result<()> {
     // a configuração na criação do cache).
     engine::configure_frame_cache();
 
+    // Limite do pool de decode (LOCALPLAYER_DECODE_THREADS) ANTES de qualquer
+    // faixa abrir: o pool do rayon nasce na primeira decodificação.
+    engine::configure_decode_threads();
+
     // hwdec como primeira opção ANTES de qualquer mídia abrir (o hub tenta os
     // decoders registrados primeiro; --probe/--bench também passam por aqui).
     let _ = engine::register_hwdec();
@@ -255,8 +259,23 @@ struct PlayerApp {
     show_stats: bool,
     /// Log automático de sessão/anomalias (sempre ligado; ver `session_log.rs`).
     session: session_log::SessionLog,
+    /// Versão do estado do provider TLS do update (o app loga quando troca).
+    tls_version: u64,
     /// PTS do último frame que foi para a tela (detecta stall com fila vazia).
     last_video_pts: f64,
+    /// Chrome interno da janela (topo + controles + playlist), em points.
+    /// Medido a cada frame com os painéis visíveis: o resize 1:1 do vídeo soma
+    /// isso ao tamanho do conteúdo para os pixels do vídeo continuarem pixels
+    /// da tela.
+    chrome: egui::Vec2,
+    /// Resolução (px de exibição) para a qual a janela já foi ajustada. Trocar
+    /// de faixa com a MESMA resolução não mexe na janela — um resize manual do
+    /// usuário sobrevive à lista de episódios do mesmo tamanho.
+    fitted: Option<(u32, u32)>,
+    /// Passadas de ajuste ainda devidas (o chrome muda quando a janela muda).
+    fit_pending: u8,
+    /// Último tamanho interno pedido ao viewport (para não repetir comando).
+    fit_target: Option<egui::Vec2>,
 }
 
 impl PlayerApp {
@@ -327,8 +346,16 @@ impl PlayerApp {
             metrics,
             show_stats: false,
             session: session_log::SessionLog::new(),
+            tls_version: craft_update::tls::version(),
             last_video_pts: 0.0,
+            chrome: egui::Vec2::ZERO,
+            fitted: None,
+            fit_pending: 0,
+            fit_target: None,
         };
+        // // local-player-rs: provider TLS do update em uso (pure por padrão).
+        // Fica pendente no log e sai com a primeira linha da sessão.
+        app.session.tls(&craft_update::tls::status_line());
         if let Some(i) = idx {
             app.select(i);
         }
@@ -537,6 +564,8 @@ impl PlayerApp {
                 // Legenda externa: procurada ao lado do vídeo agora que sabemos
                 // que a faixa tem imagem (arquivo só de áudio não tem overlay).
                 self.load_subtitles();
+                // Janela no tamanho do vídeo (1:1) na abertura da faixa.
+                self.schedule_window_fit();
             }
         }
     }
@@ -593,6 +622,75 @@ impl PlayerApp {
             gpu.set_rotation(self.rotation);
         }
         ctx.request_repaint();
+    }
+
+    /// Janela no tamanho do vídeo (pedido do João): pixels do vídeo = pixels da
+    /// tela, mais o chrome INTERNO do app (topo + controles + playlist) para o
+    /// quadro não ser encolhido pelo layout. O `fit_to_work_area_with_chrome`
+    /// faz o cap na área útil: vídeo maior que o monitor abre no maior tamanho
+    /// que cabe, nunca numa janela maior que a tela.
+    ///
+    /// Roda em toda abertura de faixa de vídeo, mas só AGE quando a resolução
+    /// de exibição MUDA. Escolha (documentada no ROADMAP): episódios de mesmo
+    /// tamanho não re-ajustam a janela, então um resize manual do usuário
+    /// sobrevive à troca de faixa; faixas de tamanhos diferentes voltam ao
+    /// tamanho do vídeo, como o player antigo abria. Fullscreen manda.
+    fn schedule_window_fit(&mut self) {
+        if self.fullscreen {
+            return;
+        }
+        let Some(pipeline) = self.video.as_ref() else { return };
+        let (w, h) = window_video_px(pipeline.info.width, pipeline.info.height, pipeline.info.par, self.rotation);
+        // Mesma resolução de exibição: a janela já é (ou o usuário escolheu) o
+        // tamanho dela — não mexe.
+        if w == 0 || h == 0 || self.fitted == Some((w, h)) {
+            return;
+        }
+        self.fitted = Some((w, h));
+        self.fit_target = None;
+        // Duas/três passadas: a primeira mede o chrome da janela ANTIGA (na
+        // abertura do app ela é a 480×600 inicial, onde as barras quebram linha
+        // e ficam mais altas); depois do resize o chrome é medido de novo e o
+        // alvo é recalculado até estabilizar.
+        self.fit_pending = 3;
+    }
+
+    /// Aplica o ajuste agendado depois que o chrome do frame foi medido.
+    fn pump_window_fit(&mut self, ctx: &egui::Context) {
+        if self.fit_pending == 0 {
+            return;
+        }
+        self.fit_pending -= 1;
+        // Sem medida do chrome (primeiro frame, painéis escondidos por
+        // inatividade) não dá para acertar 1:1 — a próxima passada acerta.
+        if self.fullscreen || self.chrome.y <= 0.0 {
+            return;
+        }
+        let Some(pipeline) = self.video.as_ref() else { return };
+        let (w, h) = window_video_px(pipeline.info.width, pipeline.info.height, pipeline.info.par, self.rotation);
+        if w == 0 || h == 0 {
+            return;
+        }
+        // O chrome interno é do layout (points) e NÃO escala com o vídeo; o
+        // helper desconta ele da área útil antes de encolher (pixels).
+        let chrome_px = self.chrome.y * ctx.pixels_per_point();
+        let (inner, pos) = lab_ui::workarea::fit_to_work_area_with_chrome(ctx, w as f32, h as f32, chrome_px);
+        if self.fit_target.is_some_and(|t| (t - inner).length() < 1.5) {
+            return;
+        }
+        self.fit_target = Some(inner);
+        // Diagnóstico: uma linha por comando de resize (o `--probe`/`--bench`
+        // não passam por aqui; sem console no release, é inofensivo).
+        let (atual_inner, atual_outer) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().outer_rect));
+        eprintln!(
+            "janela 1:1: alvo {:.0}x{:.0} pts (video {w}x{h}px, chrome {chrome_px:.0}px, ppp {:.2}) \
+             atual inner={atual_inner:?} outer={atual_outer:?}",
+            inner.x,
+            inner.y,
+            ctx.pixels_per_point()
+        );
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(inner));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
     }
 
     /// Atalhos de teclado (só fora de campo de texto). O overlay volta
@@ -1140,6 +1238,9 @@ impl PlayerApp {
     /// O resultado sai na linha de status (nada encontrado/erro); release
     /// nova abre o prompt do próprio updater.
     fn check_updates(&mut self, ctx: &egui::Context) {
+        // // local-player-rs: check manual deixa no log o provider TLS em uso
+        // (`tls_provider=pure`) antes da linha de início.
+        self.session.update_check_started();
         self.updater.check_now(ctx);
     }
 }
@@ -1166,6 +1267,13 @@ impl eframe::App for PlayerApp {
         // Update (craft_update): bombeia o check/instalação que rodam fora
         // da UI thread (mesmo desenho do Local-Keys).
         self.updater.tick(ctx);
+        // // local-player-rs: o provider TLS do update pode trocar (válvula
+        // LOCALPLAYER_TLS_FALLBACK=1); a troca vira uma linha do log na hora.
+        let tls_version = craft_update::tls::version();
+        if tls_version != self.tls_version {
+            self.tls_version = tls_version;
+            self.session.tls(&craft_update::tls::status_line());
+        }
         // Atividade do usuário e atalhos (F fullscreen, R/Shift+R rotação,
         // Espaço play/pause, M mute, ←/→ ±5 s).
         self.note_activity(ctx);
@@ -1225,6 +1333,9 @@ impl eframe::App for PlayerApp {
                 self.updater.dismiss_status();
             }
             craft_update::updater::Status::Failed(e) => {
+                // // local-player-rs: falha de check entra no log junto com o
+                // provider TLS que estava em uso (pure = caminho único).
+                self.session.update_check_failed(&e);
                 self.status = e;
                 self.status_warn = true;
                 self.updater.dismiss_status();
@@ -1374,7 +1485,9 @@ impl eframe::App for PlayerApp {
         }
 
         // Centro: vídeo (paint callback wgpu) ou a dica de áudio/playlist.
+        let mut central = egui::Rect::NOTHING;
         egui::CentralPanel::default().show(ui, |ui| {
+            central = ui.max_rect();
             if self.video.is_some() {
                 self.show_video(ui);
             } else {
@@ -1390,6 +1503,21 @@ impl eframe::App for PlayerApp {
                 });
             }
         });
+
+        // Chrome interno (topo + controles + playlist): diferença entre a janela
+        // inteira e a área central medida acima. Só com os painéis na tela —
+        // escondidos por inatividade ou em fullscreen a medida não vale, e o
+        // resize 1:1 usa a última medida válida.
+        if !hide_chrome && !self.fullscreen {
+            if let Some(inner) = ctx.input(|i| i.viewport().inner_rect) {
+                let chrome = inner.size() - central.size();
+                if chrome.x >= 0.0 && chrome.y > 0.0 {
+                    self.chrome = chrome;
+                }
+            }
+        }
+        // Ajuste 1:1 agendado pela abertura da faixa, agora com o chrome medido.
+        self.pump_window_fit(ctx);
 
         // Fullscreen: controles flutuantes por cima do vídeo (somem com a
         // inatividade, voltam com mouse/tecla).
@@ -1530,6 +1658,30 @@ fn fmt_time(secs: f64) -> String {
 /// Cor RGB do parse de legenda para o `Color32` do egui.
 fn rgb(c: [u8; 3]) -> egui::Color32 {
     egui::Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Pixels de EXIBIÇÃO do vídeo: proporção de pixel (PAR, anamórfico) aplicada
+/// antes da rotação do usuário; `0` em qualquer eixo = sem tamanho conhecido.
+///
+/// É a base do resize 1:1 da janela — a resolução do container não é o que a
+/// tela mostra (720×576 com PAR 4:3 ocupa 960×576; 1080p girado ocupa
+/// 1080×1920).
+fn window_video_px(width: u32, height: u32, par: (u32, u32), rotation: u8) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
+    let (n, d) = par;
+    let disp_w = if n > 0 && d > 0 && n != d {
+        // `as` de f64 satura em u32 (sem panic) e o `.max(1)` cobre arredondar a zero.
+        ((f64::from(width) * f64::from(n) / f64::from(d)).round() as u32).max(1)
+    } else {
+        width
+    };
+    if rotation % 2 == 1 {
+        (height, disp_w)
+    } else {
+        (disp_w, height)
+    }
 }
 
 /// Texto do overlay da tecla D: uma linha por grupo, colunas de largura fixa.
@@ -1737,5 +1889,26 @@ mod tests {
         assert_eq!(open_position(true, Some(2.0), 3600.0), 0.0);
         assert_eq!(open_position(true, Some(3590.0), 3600.0), 0.0);
         assert_eq!(open_position(true, None, 3600.0), 0.0);
+    }
+
+    /// O tamanho que a janela 1:1 usa é o de EXIBIÇÃO: PAR anamórfico na
+    /// largura antes da rotação, rotação de 90° troca os eixos.
+    #[test]
+    fn tamanho_de_exibicao_do_video() {
+        // 1080p quadrado: o container é o que a tela mostra.
+        assert_eq!(window_video_px(1920, 1080, (1, 1), 0), (1920, 1080));
+        assert_eq!(window_video_px(1920, 1080, (0, 0), 0), (1920, 1080));
+        // Girado 90°/270°: a janela fica retrato.
+        assert_eq!(window_video_px(1920, 1080, (1, 1), 1), (1080, 1920));
+        assert_eq!(window_video_px(1920, 1080, (1, 1), 3), (1080, 1920));
+        // 180° não troca eixos.
+        assert_eq!(window_video_px(1920, 1080, (1, 1), 2), (1920, 1080));
+        // PAR 4:3 em 720×576 (PAL): 960 px de exibição.
+        assert_eq!(window_video_px(720, 576, (4, 3), 0), (960, 576));
+        // A rotação vem DEPOIS do PAR: girar o 960×576 dá 576×960.
+        assert_eq!(window_video_px(720, 576, (4, 3), 1), (576, 960));
+        // Dimensão desconhecida não inventa janela.
+        assert_eq!(window_video_px(0, 1080, (1, 1), 0), (0, 0));
+        assert_eq!(window_video_px(1920, 0, (1, 1), 0), (0, 0));
     }
 }

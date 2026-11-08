@@ -87,6 +87,8 @@ linhas `event=…`:
 | `upload_ms` | subir a textura passou de 30 ms (disputa com a UI) |
 | `rss_mb` / `rss_back` | working set acima de 700 MB (e quando volta) |
 | `engine_dead` | a thread do motor de áudio morreu |
+| `update_check` | o check de update pedido pelo usuário começou (a linha anterior traz `tls_provider=`) |
+| `update_check_failed` | o check de update pedido pelo usuário falhou (com o `tls_provider=` usado, na linha anterior) |
 
 **Overlay ao vivo (tecla D)**: fps de decode e de exibição, drops (e quantos por
 atraso), atraso vs relógio, custo do upload, intervalo de repaint, RSS/pico e
@@ -107,8 +109,22 @@ local-player-rs --version | --help
 
 `--bench` passa pelo mesmo caminho de abertura do player e roda sem áudio, GPU
 ou egui: separa "o decode não acompanha o tempo real" de "a UI engargala no
-upload/repaint". O teto do cache de frames decodificados é ajustável por
-`LOCALPLAYER_FRAME_CACHE_MB` (padrão 128; `0` volta ao teto do fork, 384 MB).
+upload/repaint".
+
+**Variáveis de ambiente** (todas opcionais — o padrão é o recomendado):
+
+| Variável | O que faz |
+| --- | --- |
+| `LOCALPLAYER_FRAME_CACHE_MB` | teto do cache de frames decodificados (padrão 128; `0` volta ao teto do fork, 384 MB) |
+| `LOCALPLAYER_DECODE_THREADS` | máximo de threads dos decoders de vídeo (H.264/HEVC/VP9/AV1) e do pool do fork (padrão `0` = todos os núcleos). Em 1080p H.264, `2` ainda sobra ~4,7× de folga e libera CPU para a UI/áudio/outros programas |
+| `LOCALPLAYER_TLS_FALLBACK` | válvula de emergência do TLS do update: `1` repete a requisição com o provider padrão (ring) quando o provider 100% Rust falha num handshake. Padrão desligado — a falha aparece como erro, não é mascarada |
+
+**TLS do update é 100% Rust.** O check de release e o download do instalador usam
+`rustls-rustcrypto` (pure Rust) como caminho único. O log de sessão registra o
+provider em uso na linha `tls_provider=pure`: um check manual começa com
+`event=update_check start` (e o provider sai antes dela), uma falha grava
+`event=update_check_failed` com o detalhe. `tls_provider=fallback(...)` só aparece
+com `LOCALPLAYER_TLS_FALLBACK=1`.
 
 > **PowerShell no Windows:** o `.exe` de release é subsistema GUI, então o
 > PowerShell não espera o processo terminar (a saída aparece depois do prompt e

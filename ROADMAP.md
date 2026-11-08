@@ -45,6 +45,62 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       desde o primeiro segundo.
 - [ ] **8. Maturação** — tonemap HDR, VFR, extração do motor como crate, contribuição dos
       patches upstream (`docs/upstream/`). Legenda embutida: feita na 5c.
+- [x] **9. Janela no tamanho do vídeo** (pedido do João; dev, pós-v0.3.0) — na abertura de uma
+      faixa de vídeo a janela vai para o tamanho de EXIBIÇÃO do vídeo (PAR anamórfico + rotação
+      do usuário), 1:1 — pixels do vídeo = pixels da tela — somando o chrome INTERNO do app
+      (topo + controles + lista) e com cap na área útil (`lab_ui::workarea::fit_to_work_area_with_chrome`:
+      vídeo maior que o monitor abre no maior tamanho que cabe, nunca numa janela maior que a
+      tela). **Decisão:** o ajuste só AGE quando a resolução de exibição MUDA — episódios do
+      mesmo tamanho não re-ajustam a janela, então um resize manual do usuário sobrevive à
+      playlist; faixas de tamanhos diferentes voltam ao 1:1 (como o player antigo abria). Áudio
+      puro e fullscreen não mexem na janela; rotação não redimensiona (o R é do usuário). A math
+      pura ganhou testes (`fit_size` em `lab-ui/src/workarea.rs`, `window_video_px` em
+      `src/main.rs`).
+- [x] **10. Avaliação low-end (dev, pós-v0.3.0)** — medido com `--bench --seconds 30 --hw off`
+      (decode SW; o MF/DXVA não usa os pools) no MKV 1080p H.264 do teste, Ryzen 5 5500U (6C/12T),
+      mediana de 3 repetições:
+      | threads de decode | máquina livre | 3 loops de CPU | 8 loops (≈ rustc) |
+      | --- | --- | --- | --- |
+      | auto (12) | ~309 fps | ~239 fps (−23%) | ~166 fps (−46%) |
+      | 2 | ~142 fps | ~112 fps (−24%) | ~68 fps (−54%) |
+      | 1 | ~70 fps | — | — |
+      **Primeiro achado (corrigiu o diagnóstico):** o pool que o `gop` do fork cria (agenda cada
+      decode) NÃO é o que consome CPU — capá-lo sozinho (12 vs 2 vs 1) dava o mesmo fps. A
+      paralelização real está nos pools dos PRÓPRIOS codecs (`h264-*`, `hevc-*`, `vp9-*`, `av1-*`,
+      gerados de `available_parallelism`, máx. 16). O limite agora vale para os dois
+      (`set_decode_pool_threads` + `set_decoder_threads` no fork), e aí o trade-off aparece:
+      12→2 threads corta o fps pela metade e 2→1 pela metade de novo (escala ~2,2×).
+      **Leitura de máquina fraca:** 1080p a 29,97 fps precisa de 30 fps → 1 thread = 2,3× de
+      folga, 2 threads = 4,7×, auto = 10×. Em H.264 1080p, `LOCALPLAYER_DECODE_THREADS=2` é o
+      ponto doce: libera CPU (10 threads de sobra para UI/áudio/compilador) mantendo folga de
+      quase 5×. Não extrapolar para 4K/HEVC sem medir (a folga encurta e o pool faz mais
+      diferença). Sob contenção o cap NÃO recupera throughput (12 threads ainda vence 2): o
+      ganho é ceder CPU, não decodificar mais rápido.
+      Avaliado e **não** implementado (sem número que justifique): *pacing de 250 ms* — só existe
+      com o player parado/pausado; tocando, o repaint segue o deadline do frame, então não muda
+      nada em máquina fraca; *repaint sob demanda* já existe; *prioridade* — a thread
+      `video-decode` já é below-normal, mas as threads dos pools (gop e codecs) ficam em
+      prioridade normal: candidata futura (`spawn_handler`), não medida porque o bench não tem UI.
+      Caveat: o bench roda sem UI/GPU — o ganho de responder a UI com o rustc comendo CPU precisa
+      de QA manual no notebook.
+- [x] **11. TLS 100% Rust no update (experimento, dev)** — o `craft-update` vendored deste app usa
+      `rustls-rustcrypto 0.0.2-alpha` (MIT OR Apache-2.0) como provider ÚNICO do rustls (check de
+      release + download do instalador). **Sem fallback por padrão**: handshake que falhe vira
+      erro (linha de status do "Verificar atualizações" + `event=update_check_failed` no log, com
+      `tls_provider=pure` na linha anterior). Válvula de emergência `LOCALPLAYER_TLS_FALLBACK=1`
+      repete a requisição uma vez no provider padrão (ring) e loga `tls_provider=fallback(motivo)`.
+      Teste real (`cargo test --test tls_update_check -- --ignored --nocapture`): o handshake com
+      `api.github.com` negociou **TLSv1.3 + TLS13_AES_128_GCM_SHA256** e o `check_for_update`
+      achou a release **v0.3.0** (4 assets) — o provider puro funciona com o GitHub.
+      `cargo tree -i ring`: **o ring continua no grafo** (antes e depois; via `ureq/_ring` +
+      `rustls`), só deixou de ser o provider das requisições do update. Tirá-lo do grafo exige
+      abrir mão da válvula (ou trocá-la por native-tls/SChannel) — decisão do João.
+      Custo: +~20 crates (RustCrypto), `rustls-webpki 0.102.8` + `rsa 0.9` na árvore do provider;
+      o `cargo deny` passou a ignorar 5 advisories do webpki 0.102 e 2 do rsa/crypto-bigint, com
+      justificativa no `deny.toml` (o 0.102 entra só pelo tipo `alg_id`; a verificação de cadeia é
+      do webpki 0.103.16 + verificador do SO; o rsa só verifica assinatura pública, não decifra).
+      **Revisitar antes de um release**: ou o upstream migra para o webpki 0.103, ou o experimento
+      não vai para release. Fora do escopo por decisão: não estender aos outros apps da suíte.
 
 ## Pendências conhecidas
 
@@ -62,6 +118,14 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
 - **Legenda embutida** — suporta texto (SRT/VTT/ASS do MKV e tx3g do MP4). Faixas bitmap
   (PGS/VobSub) são listadas no `--probe` e ignoradas no player; `wvtt` em MP4 (amostras em caixas)
   ainda não é interpretado.
+- **Janela 1:1 e chrome dinâmico** — o resize mede o chrome na abertura e recalcula em até 3
+  passadas (a janela inicial é estreita e as barras quebram linha, o chrome muda depois do
+  resize). Se o chrome mudar DEPOIS (linha de status da legenda, item novo na lista), o vídeo fica
+  com uma borda de poucos px até a próxima faixa — perseguir o chrome por frame faria a janela
+  "respirar" sozinha, então não.
+- **TLS do update** — ver a fase 11: provider puro sem fallback padrão, ring ainda no grafo
+  (`cargo tree -i ring`) e 7 advisories ignoradas no `deny.toml` com justificativa (webpki 0.102
+  só pelo tipo `alg_id`; rsa só verifica assinatura pública). Revisitar antes de release.
 
 ## Dívida técnica
 

@@ -69,13 +69,34 @@ pub fn configure_frame_cache() {
     filmcraft_codecs::gop::set_frame_cache_budget(bytes);
 }
 
+/// Threads do pool de decode do fork do FilmCraft (rayon), que por padrão usa
+/// TODOS os núcleos (`available_parallelism`) e disputa CPU com a UI, o áudio e
+/// o que mais estiver rodando na máquina.
+///
+/// `LOCALPLAYER_DECODE_THREADS=N` limita o pool a N threads; `0` (padrão) fica
+/// no automático do fork. Vale a partir do próximo arranque: o pool do rayon é
+/// construído uma vez, na primeira decodificação (por isso a chamada é no
+/// arranque, antes de qualquer mídia abrir). Medido com o `--bench` no
+/// ROADMAP.
+pub fn configure_decode_threads() {
+    let n = std::env::var("LOCALPLAYER_DECODE_THREADS").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+    // Dois pools no fork: o que agenda o decode de cada cache (gop) e os pools
+    // de worker dos PRÓPRIOS codecs (h264-*, hevc-*, vp9-*, av1-*) — são estes
+    // que comem a CPU. O mesmo limite vale para os dois.
+    filmcraft_codecs::gop::set_decode_pool_threads(n);
+    filmcraft_codecs::set_decoder_threads(n);
+    let mode = if n == 0 { "auto (todos os nucleos)".to_string() } else { format!("limite de {n} thread(s)") };
+    eprintln!("decode: pool e codecs {mode}");
+}
+
 /// hwdec como primeira opção: registra o decoder de hardware do sistema na
-/// frente dos pure-Rust do hub (Windows: Media Foundation + DXVA). Chamado no
-/// arranque, antes de qualquer mídia abrir — inclusive `--probe`/`--bench`.
+/// frente dos pure-Rust do hub (Windows: Media Foundation + DXVA; Linux:
+/// VA-API e NVDEC). Chamado no arranque, antes de qualquer mídia abrir —
+/// inclusive `--probe`/`--bench`.
 ///
 /// Streams que o decoder de hardware recusa (codec/perfil/bit depth/tamanho,
-/// sem GPU, switch off) e falhas no meio do stream caem no decoder SW sem o
-/// chamador saber (`HybridDecoder`); nada fica indecodificável. Linux/macOS:
+/// sem GPU/driver, switch off) e falhas no meio do stream caem no decoder SW
+/// sem o chamador saber (`HybridDecoder`); nada fica indecodificável. macOS:
 /// sem efeito até a fase da plataforma (o SW é a fundação).
 pub fn register_hwdec() -> filmcraft_hwdec::Availability {
     let availability = filmcraft_hwdec::register();

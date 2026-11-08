@@ -1,5 +1,5 @@
 //! i18n via craft-i18n (padrão storytold): catálogos TSV em `i18n/locales/` embutidos
-//! pelo `build.rs` (fonte: `scripts/gen_i18n.py` converte este enum). O enum `Key`
+//! pelo `build.rs` (manutencao manual dos TSVs; gen_i18n.py removido por defasado). O enum `Key`
 //! fica como API tipada (compilador cobre completude); o lookup é o motor do
 //! craft-i18n, com fallback `pt-br → pt → en` e ausência de tradução = inglês.
 

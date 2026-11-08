@@ -76,6 +76,23 @@ ignore = [
     { id = "RUSTSEC-2026-0391", reason = "leak entre streams de zip; entrada é o release oficial no GitHub" },
     { id = "RUSTSEC-2026-0398", reason = "Vec além da capacidade em decompress; entrada é o release oficial no GitHub" },
     { id = "RUSTSEC-2026-0403", reason = "memória não inicializada em frame legacy; entrada é o release oficial no GitHub" },
+    # ── // local-player-rs: experimento TLS 100% Rust (rustls-rustcrypto 0.0.2-alpha) ──
+    # O provider puxa rustls-webpki 0.102 SÓ pelo newtype `alg_id` (identificador
+    # de algoritmo da assinatura). A verificação de cadeia é do rustls 0.23.46
+    # (rustls-webpki 0.103.16) + verifier do SO; nenhuma função destas advisories
+    # (CRL, name constraints, chain building) é alcançável. Revisitar quando o
+    # rustls-rustcrypto migrar para webpki 0.103 — se o experimento ficar, o certo
+    # é cobrar upstream/vendorizar em vez de manter o ignore.
+    { id = "RUSTSEC-2026-0049", reason = "webpki 0.102 só pelo tipo alg_id; verificação de cadeia é webpki 0.103 + SO" },
+    { id = "RUSTSEC-2026-0098", reason = "webpki 0.102 só pelo tipo alg_id; name constraints nunca avaliadas aqui" },
+    { id = "RUSTSEC-2026-0099", reason = "webpki 0.102 só pelo tipo alg_id; name constraints nunca avaliadas aqui" },
+    { id = "RUSTSEC-2026-0104", reason = "webpki 0.102 só pelo tipo alg_id; CRL não é parseada aqui" },
+    { id = "RUSTSEC-2026-0382", reason = "webpki 0.102 só pelo tipo alg_id; a verificação real usa 0.103.16" },
+    # rsa/crypto-bigint vêm da VERIFICAÇÃO de assinatura RSA (chave pública) do
+    # provider: o cliente não decifra nem assina, então o ataque de timing
+    # (Marvin: recuperação da chave privada em decifração) não tem alvo aqui.
+    { id = "RUSTSEC-2023-0071", reason = "rsa só verifica assinatura de servidor (chave pública); cliente não decifra" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint do rsa: operações de chave privada não acontecem no cliente" },
 ]
 
 # Fontes padrão do egui (Ubuntu-Light, Hack, emoji-icon-font): licenças de fonte

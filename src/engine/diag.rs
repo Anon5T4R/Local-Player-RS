@@ -120,8 +120,10 @@ pub fn probe(path: &str) -> Result<ProbeReport, EngineError> {
 }
 
 /// O que dá para afirmar sobre o hwdec antes de abrir um decoder: a família e o
-/// bit depth do stream, o MFT existir e a GPU listar o perfil DXVA. "Provável"
-/// de propósito: o perfil/tamanho exatos ainda têm a palavra final na abertura.
+/// bit depth do stream e o backend existir (Windows: o MFT e o perfil DXVA na
+/// GPU; Linux: o driver VA-API aceitar uma configuração, ou o NVDEC registrado).
+/// "Provável" de propósito: o perfil/tamanho exatos ainda têm a palavra final na
+/// abertura.
 fn hwdec_line(codec: &str, width: u32, height: u32, pixel_format: &str) -> String {
     let p = filmcraft_hwdec::probe(codec, width, height, pixel_format);
     match p.choice {
@@ -314,7 +316,7 @@ fn decoder_label(hw: &HwStats, codec: &str) -> String {
     if hw.declined > 0 {
         return "software (the hardware decoder declined this stream)".into();
     }
-    if filmcraft_hwdec::codec::family(codec).is_none() {
+    if !filmcraft_hwdec::codec::taken(codec) {
         return "software (no hardware path for this codec)".into();
     }
     "software".into()

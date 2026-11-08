@@ -88,7 +88,8 @@ pub enum HwMode {
     Off,
     /// O decoder de hardware pegou a faixa (nenhum quadro saiu ainda).
     Pending,
-    /// Decodificando no hardware do sistema (Windows: Media Foundation / DXVA).
+    /// Decodificando no hardware do sistema (Windows: Media Foundation / DXVA;
+    /// Linux: VA-API / NVDEC).
     Hardware,
     /// O hardware começou e caiu para o decoder SW no meio do stream.
     HardwareThenSoftware,
@@ -116,7 +117,8 @@ impl HwMode {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HwUsage {
     pub mode: HwMode,
-    /// Backend registrado no arranque ("Media Foundation"), quando há.
+    /// Backend registrado no arranque ("Media Foundation", "VA-API", "NVDEC"),
+    /// quando há.
     pub backend: Option<&'static str>,
     /// Quadros que saíram do decoder de hardware.
     pub frames: u64,
@@ -146,14 +148,16 @@ impl HwUsage {
 /// testada sem GPU (o teste de integração real é o `--bench`).
 ///
 /// `codec_takes_hardware` = a família do codec está entre as que o backend
-/// decodifica (H.264/HEVC/VP9/AV1); o perfil/bit depth ainda podem recusar, e aí
-/// o contador `declined` conta a história.
+/// decodifica desta plataforma (H.264/HEVC no Linux; + VP9/AV1 no Windows); o
+/// perfil/bit depth ainda podem recusar, e aí o contador `declined` conta a
+/// história.
 fn hw_mode(policy: bool, backend: Option<&'static str>, codec_takes_hardware: bool, d: HwStats) -> HwMode {
     if !policy {
         return HwMode::Off;
     }
     if backend.is_none() {
-        // Plataforma sem backend (Linux/macOS por enquanto) ou registro falhou.
+        // Plataforma sem backend (macOS por enquanto, ou sem VA-API/NVDEC no
+        // Linux) ou registro falhou.
         return HwMode::Software;
     }
     if d.fallbacks > 0 {
@@ -368,7 +372,7 @@ impl Metrics {
         let mode = match video {
             None => HwMode::Idle,
             Some(codec) => {
-                let takes = filmcraft_hwdec::codec::family(codec).is_some();
+                let takes = filmcraft_hwdec::codec::taken(codec);
                 hw_mode(filmcraft_codecs::hw::hardware_decoding(), backend, takes, delta)
             }
         };
@@ -678,7 +682,7 @@ mod tests {
         let s = |frames, sessions, declined, fallbacks| HwStats { frames, sessions, declined, fallbacks };
         // Switch off vence tudo.
         assert_eq!(hw_mode(false, Some("Media Foundation"), true, s(100, 1, 0, 0)), HwMode::Off);
-        // Sem backend registrado (Linux/macOS por enquanto): software.
+        // Sem backend registrado (macOS por enquanto, ou sem VA-API/NVDEC): software.
         assert_eq!(hw_mode(true, None, true, s(0, 0, 0, 0)), HwMode::Software);
         // Codec fora do backend: software desde já (sem esperar o primeiro frame).
         assert_eq!(hw_mode(true, Some("Media Foundation"), false, s(0, 0, 0, 0)), HwMode::Software);

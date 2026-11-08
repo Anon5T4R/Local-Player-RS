@@ -110,16 +110,39 @@ impl Default for Decoder {
     }
 }
 
+/// // fork local-player-rs: host cap on this decoder's worker threads (`0` = the
+/// auto-detected count, the upstream behaviour). A player shares the CPU with its UI, the audio
+/// thread and whatever else the machine runs.
+static THREAD_CAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// // fork local-player-rs: cap the worker threads of the decoders created from now on.
+pub fn set_threads_cap(threads: usize) {
+    THREAD_CAP.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// // fork local-player-rs: `n` under the configured cap.
+fn capped_by(configured: usize, n: usize) -> usize {
+    let n = n.max(1);
+    match configured {
+        0 => n,
+        cap => n.min(cap.max(1)),
+    }
+}
+
+fn capped(n: usize) -> usize {
+    capped_by(THREAD_CAP.load(std::sync::atomic::Ordering::Relaxed), n)
+}
+
 /// The worker threads [`Decoder::new`] uses: the available cores (at most 16) with the `threads`
 /// feature on native targets, 1 otherwise.
 pub fn default_threads() -> usize {
     #[cfg(all(feature = "threads", not(target_arch = "wasm32")))]
     {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16)
+        capped(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16))
     }
     #[cfg(not(all(feature = "threads", not(target_arch = "wasm32"))))]
     {
-        1
+        capped(1)
     }
 }
 
@@ -630,5 +653,21 @@ fn make_picture(o: &Output<FrameRef>) -> Picture {
         },
         sar: o.meta.sar,
         draft: o.meta.draft,
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::capped_by;
+
+    /// // fork local-player-rs: 0 = auto (upstream); o cap nunca sobe acima dos núcleos da
+    /// máquina e nunca desce abaixo de 1.
+    #[test]
+    fn a_host_thread_cap_never_exceeds_the_cores() {
+        assert_eq!(capped_by(0, 12), 12);
+        assert_eq!(capped_by(2, 12), 2);
+        assert_eq!(capped_by(1, 12), 1);
+        assert_eq!(capped_by(32, 12), 12);
+        assert_eq!(capped_by(3, 0), 1);
     }
 }

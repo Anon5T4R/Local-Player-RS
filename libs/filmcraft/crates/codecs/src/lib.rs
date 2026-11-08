@@ -111,6 +111,20 @@ pub fn video_decoder_registered(f: VideoDecoderFactory) -> bool {
     factories().read().unwrap_or_else(|e| e.into_inner()).iter().any(|x| std::ptr::fn_addr_eq(*x, f))
 }
 
+/// // fork local-player-rs: cap the WORKER threads of the pure-Rust decoders created from now on
+/// (H.264/HEVC/VP9/AV1 frame threading, `0` = auto, the upstream behaviour).
+///
+/// The codecs build their own rayon pools (`h264-*`, `hevc-*`, `vp9-*`, `av1-*`), separate from
+/// [`gop::set_decode_pool_threads`] (that one only schedules each cache's decode job). These are
+/// the threads that actually burn the CPU while decoding, so a player that shares the machine
+/// with its UI, the audio thread and a compiler caps them here.
+pub fn set_decoder_threads(threads: usize) {
+    filmcraft_h264::set_threads_cap(threads);
+    filmcraft_hevc::set_threads_cap(threads);
+    filmcraft_vp9::set_threads_cap(threads);
+    filmcraft_av1::set_threads_cap(threads);
+}
+
 /// Create a decoder for a sample entry.
 pub fn make_video_decoder(entry: &filmcraft_isobmff::SampleEntry) -> Result<Box<dyn VideoDecoder>> {
     let g = factories().read().unwrap_or_else(|e| e.into_inner());

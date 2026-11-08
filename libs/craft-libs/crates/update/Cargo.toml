@@ -24,6 +24,14 @@ getrandom = "0.3"
 tempfile = "3"
 sha2 = "0.10"
 ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "_ring", "gzip", "platform-verifier"] }
+# // local-player-rs: provider 100% Rust para o rustls (experimento do app; ver src/tls.rs).
+# `rustls` entra direto só para o tipo `CryptoProvider` que o ureq aceita
+# (`unversioned_rustls_crypto_provider`); ring continua compilado como provider de fallback.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
+rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["std", "tls12"] }
+# // local-player-rs: verificação da cadeia pelo SO com um provider arbitrário — o
+# `probe_pure` do teste ignora o ureq e faz o handshake direto para reportar a suite.
+rustls-platform-verifier = { version = "0.7", default-features = false }
 chrono = { workspace = true }
 semver = { version = "1", features = ["serde"] }
 
