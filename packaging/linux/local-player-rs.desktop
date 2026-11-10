@@ -2,10 +2,14 @@
 Type=Application
 Name=Local Player RS
 GenericName=Media Player
-Keywords=player;media;video;music;audio;local;
+Keywords=player;media;video;music;audio;subtitles;local;
 Exec=local-player-rs
+TryExec=local-player-rs
 Icon=local-player-rs
-Categories=AudioVideo;Video;Audio;
-Comment=Player de mídia 100% local e offline em Rust puro
+Categories=AudioVideo;Player;
+Comment=Player de mídia 100% local e offline em Rust puro — vídeo, áudio e legendas
 Terminal=false
+# O runner nativo não completa o handshake de startup-notification (igual ao local-image).
+StartupNotify=false
 StartupWMClass=local-player-rs
+MimeType=video/mp4;video/x-matroska;video/webm;video/x-msvideo;video/mp2t;audio/mpeg;audio/flac;audio/mp4;audio/ogg;audio/x-wav;audio/aiff;

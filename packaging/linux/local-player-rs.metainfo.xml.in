@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata (software centres, Flathub). Template: package.sh substitutes @VERSION@
+     and @DATE@ from Cargo.toml and the build date. -->
+<component type="desktop-application">
+  <!-- rDNS no AppStream (exigência do appstreamcli); a identidade do app — WM class, .desktop,
+       ícone, nomes de asset do updater — continua flat "local-player-rs" (launchable abaixo). -->
+  <id>com.local.localplayer</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Local Player RS</name>
+  <summary>Play local video and audio files, fully offline</summary>
+  <developer id="com.local.localplayer">
+    <name>Local Player RS contributors</name>
+  </developer>
+  <description>
+    <p>
+      Local Player RS is an open-source media player written in pure Rust: demuxing and decoding
+      run in-process, with no external player, no runtime downloads and no telemetry. It plays
+      common video and audio containers and shows external subtitles next to the media file.
+      100% local and offline.
+    </p>
+  </description>
+  <launchable type="desktop-id">local-player-rs.desktop</launchable>
+  <icon type="stock">local-player-rs</icon>
+  <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
+  <url type="homepage">https://github.com/Anon5T4R/Local-Player-RS</url>
+  <url type="bugtracker">https://github.com/Anon5T4R/Local-Player-RS/issues</url>
+  <url type="help">https://github.com/Anon5T4R/Local-Player-RS</url>
+  <url type="contact">https://github.com/Anon5T4R/Local-Player-RS/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Player</category>
+  </categories>
+  <keywords>
+    <keyword>player</keyword>
+    <keyword>media</keyword>
+    <keyword>video</keyword>
+    <keyword>audio</keyword>
+    <keyword>subtitles</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <!-- Media formats the player opens, as in the desktop entry's MimeType=. -->
+  <provides>
+    <binary>local-player-rs</binary>
+    <mediatype>video/mp4</mediatype>
+    <mediatype>video/x-matroska</mediatype>
+    <mediatype>video/webm</mediatype>
+    <mediatype>video/x-msvideo</mediatype>
+    <mediatype>video/mp2t</mediatype>
+    <mediatype>audio/mpeg</mediatype>
+    <mediatype>audio/flac</mediatype>
+    <mediatype>audio/mp4</mediatype>
+    <mediatype>audio/ogg</mediatype>
+    <mediatype>audio/x-wav</mediatype>
+    <mediatype>audio/aiff</mediatype>
+  </provides>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

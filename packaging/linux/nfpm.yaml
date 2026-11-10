@@ -1,0 +1,68 @@
+# .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
+# the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand env vars in `src`) and
+# exports VERSION and NFPM_ARCH.
+#
+#   nfpm package -f packaging/linux/nfpm.yaml -p deb -t dist/release/
+name: local-player-rs
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+# semver: 0.2.0-rc.1 becomes 0.2.0~rc.1 in deb/rpm, so pre-releases sort before the release.
+version_schema: semver
+release: 1
+section: video
+priority: optional
+maintainer: ${LOCALPLAYER_MAINTAINER}
+vendor: Local Player RS contributors
+homepage: https://github.com/Anon5T4R/Local-Player-RS
+license: GPL-3.0-or-later
+description: |-
+  Media player that works 100% locally and offline.
+  Pure-Rust demux and decode (FilmCraft codecs + symphonia), in-process
+  playback of common video and audio files, and external subtitles.
+
+# The binary links glibc, libgcc_s and alsa (cpal) directly. Windowing (X11/Wayland, xkbcommon)
+# and the GPU (Vulkan, EGL/GL) are loaded at runtime, so they are dependencies/recommendations
+# here rather than ELF NEEDED entries.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libgcc-s1
+      - libasound2
+      - libxkbcommon0
+      - libvulkan1 | libegl1
+    recommends:
+      - libwayland-client0
+      - libx11-6
+      - libx11-xcb1
+      - libxcursor1
+      - libxi6
+      - libxrandr2
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+  rpm:
+    depends:
+      - alsa-lib
+      - libxkbcommon
+      - (vulkan-loader or libglvnd-egl)
+    recommends:
+      - libwayland-client
+      - libX11
+      - libXcursor
+      - libXi
+      - libXrandr
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+
+contents:
+  - src: ${STAGE}/usr/bin/local-player-rs
+    dst: /usr/bin/local-player-rs
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/
+    dst: /usr/share/
+    type: tree
+
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  postremove: packaging/linux/postinst.sh
