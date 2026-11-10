@@ -80,6 +80,11 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -type f ! -name 'SHA256SUMS.txt' -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
       - name: Criar release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,6 +94,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Local Player RS ${GITHUB_REF_NAME}" \
             --notes "Player de mídia 100% local e offline em Rust puro." \
-            dist/windows/* dist/linux/* \
+            dist/windows/* dist/linux/* dist/SHA256SUMS.txt \
           || gh release upload "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --clobber \
-            dist/windows/* dist/linux/*
+            dist/windows/* dist/linux/* dist/SHA256SUMS.txt

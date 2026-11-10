@@ -4,7 +4,6 @@ Name=Local Player RS
 GenericName=Media Player
 Keywords=player;media;video;music;audio;subtitles;local;
 Exec=local-player-rs
-TryExec=local-player-rs
 Icon=local-player-rs
 Categories=AudioVideo;Player;
 Comment=Player de mídia 100% local e offline em Rust puro — vídeo, áudio e legendas
