@@ -17,6 +17,7 @@ mod cli;
 mod engine;
 mod icons;
 mod metrics;
+mod pickers;
 mod queue;
 mod resume;
 mod session_log;
@@ -194,6 +195,8 @@ struct PlayerApp {
     dir_rx: Option<Receiver<Result<Vec<String>, String>>>,
     /// Motor de áudio (thread própria; a UI só manda comandos e drena eventos).
     engine: engine::PlayerEngine,
+    /// Seletor nativo (async: resposta chega num frame posterior).
+    pickers: pickers::Pickers,
     /// Verificação e instalação de atualização (craft_update): check no
     /// arranque/pedido, prompt egui próprio e self-update em thread própria.
     updater: craft_update::updater::Updater,
@@ -312,6 +315,7 @@ impl PlayerApp {
             now: String::new(),
             status: String::new(),
             dir_rx: None,
+            pickers: pickers::Pickers::default(),
             engine,
             updater: craft_update::updater::Updater::new(&APP, CURRENT_VERSION),
             resume: resume::load(),
@@ -1277,6 +1281,29 @@ impl eframe::App for PlayerApp {
         // Update (craft_update): bombeia o check/instalação que rodam fora
         // da UI thread (mesmo desenho do Local-Keys).
         self.updater.tick(ctx);
+        // Seletor nativo (src/pickers.rs): consome a resposta que chegou da
+        // thread (ela acorda este frame com request_repaint).
+        for picked in self.pickers.take() {
+            match picked {
+                pickers::Picked::File(p) => {
+                    let p = p.display().to_string();
+                    if !self.playlist.files.contains(&p) {
+                        self.playlist.files.push(p);
+                        resume::save_playlist(&self.playlist);
+                    }
+                }
+                pickers::Picked::Folder(dir) => {
+                    // Fora da UI thread: read_dir em pasta de rede/nuvem tem a
+                    // MESMA lentidão do Explorer — na UI thread travava a janela.
+                    let dir = dir.display().to_string();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(list_media(&dir));
+                    });
+                    self.dir_rx = Some(rx);
+                }
+            }
+        }
         // Atividade do usuário e atalhos (F fullscreen, R/Shift+R rotação,
         // Espaço play/pause, M mute, ←/→ ±5 s).
         self.note_activity(ctx);
@@ -1436,24 +1463,12 @@ impl eframe::App for PlayerApp {
                     ui.strong(t(Key::Items));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button(format!("+ {}", t(Key::AddFile))).clicked() {
-                            if let Some(p) = pick_media() {
-                                if !self.playlist.files.contains(&p) {
-                                    self.playlist.files.push(p);
-                                    resume::save_playlist(&self.playlist);
-                                }
-                            }
+                            // Seletor nativo; a resposta chega num frame
+                            // posterior (src/pickers.rs). Cancelar = silêncio.
+                            self.pickers.ask_file(ui.ctx(), &[("Mídia", MEDIA_EXTS)]);
                         }
                         if ui.button(format!("+ {}", t(Key::AddFolder))).clicked() {
-                            if let Some(dir) = pick_dir() {
-                                // Fora da UI thread: read_dir em pasta de
-                                // rede/nuvem (OneDrive) tem a MESMA lentidão do
-                                // Explorer — na UI thread travava a janela.
-                                let (tx, rx) = std::sync::mpsc::channel();
-                                std::thread::spawn(move || {
-                                    let _ = tx.send(list_media(&dir));
-                                });
-                                self.dir_rx = Some(rx);
-                            }
+                            self.pickers.ask_folder(ui.ctx());
                         }
                         if ui.add_enabled(!self.playlist.files.is_empty(), egui::Button::new(t(Key::Clear))).clicked() {
                             self.playlist.files.clear();
@@ -1776,28 +1791,6 @@ fn stats_table(rows: &[(&str, Vec<String>)]) -> String {
     let used = out.trim_end().len();
     out.truncate(used);
     out
-}
-
-fn pick_media() -> Option<String> {
-    #[cfg(windows)]
-    {
-        rfd::FileDialog::new().add_filter("Mídia", MEDIA_EXTS).pick_file().map(|p| p.display().to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        None // Linux: caminho digitado (política do lab: AppImage enxuto)
-    }
-}
-
-fn pick_dir() -> Option<String> {
-    #[cfg(windows)]
-    {
-        rfd::FileDialog::new().pick_folder().map(|p| p.display().to_string())
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
 }
 
 fn list_media(dir: &str) -> Result<Vec<String>, String> {
