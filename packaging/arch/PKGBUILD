@@ -6,7 +6,7 @@
 #   makepkg -si   (local, com o tarball da release ao lado)
 
 pkgname=local-player-rs
-pkgver=0.5.4
+pkgver=0.5.5
 pkgrel=1
 pkgdesc='Player de mídia 100% local e offline em Rust puro'
 arch=(x86_64)
