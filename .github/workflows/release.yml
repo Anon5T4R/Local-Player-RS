@@ -45,6 +45,7 @@ jobs:
           ok=0
           for try in 1 2 3 4 5; do
             sudo apt-get update && ok=1 && break
+            echo "apt: tentativa $try falhou — repetindo em 20s (blip de mirror do runner)"
             sleep 20
           done
           [ "$ok" = 1 ]
