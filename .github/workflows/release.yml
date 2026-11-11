@@ -42,8 +42,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Dependências de empacotamento
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libasound2-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev zsync
+          ok=0
+          for try in 1 2 3 4 5; do
+            sudo apt-get update && ok=1 && break
+            sleep 20
+          done
+          [ "$ok" = 1 ]
+          ok=0
+          for try in 1 2 3 4 5; do
+            sudo apt-get install -y pkg-config libasound2-dev libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev zsync && ok=1 && break
+            echo "apt: tentativa $try falhou — repetindo em 20s (blip de mirror do runner)"
+            sleep 20
+          done
+          [ "$ok" = 1 ]
           curl -sSfL https://github.com/goreleaser/nfpm/releases/download/v2.48.0/nfpm_2.48.0_amd64.deb -o /tmp/nfpm.deb
           sudo dpkg -i /tmp/nfpm.deb
       - name: Build e pacote
