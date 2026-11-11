@@ -1,10 +1,9 @@
-# PKGBUILD do Local Player RS para Arch (uso pessoal do João; não publicado no AUR).
+# PKGBUILD do local-player-rs para Arch (uso pessoal do João; não publicado no AUR).
 # Instala a árvore FHS (bin/ + share/) do tarball da release — o mesmo artefato
-# que o package.sh gera —, então pacman -Ql lista os arquivos e pacman -R remove
-# tudo. O sha256 fica SKIP porque o hash só existe após a release existir; confie
-# no transport (HTTPS) ou preencha manualmente com `updpkgsums`.
+# que o package.sh gera. O sha256 fica SKIP no repo (o hash só existe após a
+# release); o job arch do CI substitui pelo real ao construir o pacote.
 #
-#   makepkg -si
+#   makepkg -si   (local, com o tarball da release ao lado)
 
 pkgname=local-player-rs
 pkgver=0.5.3
@@ -13,9 +12,10 @@ pkgdesc='Player de mídia 100% local e offline em Rust puro'
 arch=(x86_64)
 url='https://github.com/Anon5T4R/Local-Player-RS'
 license=('GPL-3.0-or-later')
-depends=(glibc gcc-libs alsa-lib libxcb libxrandr libxi libxcursor libxkbcommon)
+depends=(glibc gcc-libs libxcb libxrandr libxi libxcursor libxkbcommon alsa-lib)
 optdepends=('xdg-desktop-portal: seletor nativo de arquivos (GNOME/KDE já trazem)')
-source=("local-player-rs-$pkgver-linux-x86_64.tar.gz::https://github.com/Anon5T4R/Local-Player-RS/releases/download/v$pkgver/local-player-rs-$pkgver-linux-x86_64.tar.gz")
+options=(!debug)
+source=("local-player-rs-$pkgver-linux-x86_64.tar.gz")
 sha256sums=('SKIP')
 
 package() {

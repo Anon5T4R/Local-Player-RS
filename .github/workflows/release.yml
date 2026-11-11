@@ -55,22 +55,43 @@ jobs:
           if-no-files-found: error
 
   arch:
+    needs: linux
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     container: archlinux:base
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - name: Valida PKGBUILD (parse real com makepkg)
-        # makepkg se recusa a rodar como root, e o container do Actions entra como
-        # root: o parse roda com um usuário sem privilégios.
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux
+          path: dist/release
+      - name: Pacote Arch (makepkg a partir do tarball da release)
         run: |
+          set -euo pipefail
+          # makepkg recusa root: usuário sem privilégio constrói; fakeroot
+          # normaliza a posse dos arquivos do pacote.
+          pacman -Sy --noconfirm fakeroot >/dev/null
           useradd -m builder
-          chown -R builder:builder packaging
-          su builder -c 'cd packaging/arch && makepkg --printsrcinfo >/dev/null'
-          echo "PKGBUILD ok"
-
+          version=$(grep -m1 '^version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          work=$(mktemp -d)
+          cp packaging/arch/PKGBUILD "$work/"
+          cp "dist/release/local-player-rs-$version-linux-x86_64.tar.gz" "$work/local-player-rs-$version-linux-x86_64.tar.gz"
+          # Fonte local (a URL da release ainda não existe neste ponto do
+          # pipeline) + checksum REAL do artefato em vez de SKIP.
+          sha=$(sha256sum "$work/local-player-rs-$version-linux-x86_64.tar.gz" | cut -d' ' -f1)
+          sed -i "s|^source=.*|source=(\"local-player-rs-$pkgver-linux-x86_64.tar.gz\")|; s|^sha256sums=.*|sha256sums=('$sha')|" "$work/PKGBUILD"
+          chown -R builder "$work"
+          cd "$work"
+          su builder -c 'makepkg --noconfirm --noprogressbar'
+          mv local-player-rs-*.pkg.tar.zst "$GITHUB_WORKSPACE/"
+          ls -lh "$GITHUB_WORKSPACE"/*.pkg.tar.zst
+      - uses: actions/upload-artifact@v7
+        with:
+          name: arch
+          path: '*.pkg.tar.zst'
+          if-no-files-found: error
   publish:
     needs: [windows, linux, arch]
     runs-on: ubuntu-latest
@@ -94,6 +115,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Local Player RS ${GITHUB_REF_NAME}" \
             --notes "Player de mídia 100% local e offline em Rust puro." \
-            dist/windows/* dist/linux/* dist/SHA256SUMS.txt \
+            dist/windows/* dist/linux/* dist/arch/* dist/SHA256SUMS.txt \
           || gh release upload "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --clobber \
-            dist/windows/* dist/linux/* dist/SHA256SUMS.txt
+            dist/windows/* dist/linux/* dist/arch/* dist/SHA256SUMS.txt
