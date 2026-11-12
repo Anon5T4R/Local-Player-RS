@@ -5,13 +5,15 @@
 #
 #   makepkg -si   (local, com o tarball da release ao lado)
 
-pkgname=local-player-rs
+pkgname=ai.storyteller.local-player
 pkgver=0.5.6
 pkgrel=1
 pkgdesc='Player de mídia 100% local e offline em Rust puro'
 arch=(x86_64)
 url='https://github.com/Anon5T4R/Local-Player-RS'
 license=('GPL-3.0-or-later')
+provides=('local-player-rs')
+conflicts=('local-player-rs')
 depends=(glibc gcc-libs libxcb libxrandr libxi libxcursor libxkbcommon alsa-lib)
 optdepends=('xdg-desktop-portal: seletor nativo de arquivos (GNOME/KDE já trazem)')
 options=(!debug)
