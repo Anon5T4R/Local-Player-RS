@@ -18,7 +18,7 @@ pub const EFFECTCRAFT: App = App::new("effectcraft", "EffectCraft", "Motion grap
 pub const DESIGNCRAFT: App = App::new("designcraft", "DesignCraft", "Page layout and publishing", "storytold/designcraft");
 pub const FIGCRAFT: App = App::new("figcraft", "FigCraft", "Interface design and prototyping", "storytold/figcraft");
 pub const LOCALPLAYER: App =
-    App { publisher: "LocalPlayer contributors", ..App::new("local-player", "Local Player", "Media player", "Anon5T4R/Local-Player") };
+    App { publisher: "LocalPlayer contributors", ..App::new("local-player", "Local Player", "Media player", "Anon5T4R/Local-Player-RS") };
 pub const SOUNDCRAFT: App = App::new("soundcraft", "SoundCraft", "Recording, editing and mixing audio", "storytold/soundcraft");
 pub const DECKCRAFT: App = App::new("deckcraft", "DeckCraft", "Presentations and slide shows", "storytold/deckcraft");
 pub const LOCALSLIDES: App = App {
