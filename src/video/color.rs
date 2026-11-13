@@ -11,7 +11,10 @@
 //!
 //! A normalização da faixa é dobrada nos coeficientes: cada linha da matriz já
 //! multiplica a amostra crua da textura (0..1 sobre o código de 8 bits) e soma
-//! o deslocamento do neutro, então o shader só faz `dot` + soma.
+//! o deslocamento do neutro, então o shader só faz `dot` + soma. Em 10/12 bits
+//! a thread de decode converte o código real para essa escala de 8 bits (ver
+//! `engine::video::to_unorm16`), então a matriz é a mesma para qualquer
+//! profundidade e as duas faixas continuam corretas.
 
 use filmcraft_color::{ColorInfo, Range};
 
@@ -25,7 +28,13 @@ impl YuvMatrix {
     /// Aplica a matriz a códigos de 8 bits (mesma conta do shader; usada nos testes).
     #[cfg(test)]
     pub fn apply(&self, y: f32, cb: f32, cr: f32) -> [f32; 3] {
-        let (y, cb, cr) = (y / 255.0, cb / 255.0, cr / 255.0);
+        self.apply_normalized(y / 255.0, cb / 255.0, cr / 255.0)
+    }
+
+    /// Aplica a matriz direto a amostras já normalizadas (0..1 do código de 8
+    /// bits), como a textura entrega — valida a convenção de 10/12 bits.
+    #[cfg(test)]
+    pub fn apply_normalized(&self, y: f32, cb: f32, cr: f32) -> [f32; 3] {
         self.rows.map(|r| (r[0] * y + r[1] * cb + r[2] * cr + r[3]).clamp(0.0, 1.0))
     }
 
@@ -120,12 +129,14 @@ mod tests {
     /// O uniform tem exatamente os 24 floats do layout WGSL.
     #[test]
     fn uniform_tem_24_floats() {
-        let bytes = yuv_to_rgb(&ColorInfo::REC709).uniform_bytes([1.0, 0.0, 0.0, 1.0], [0.0, 0.0], true, [1.0, 1000.0, 0.0, 0.0]);
+        let bytes = yuv_to_rgb(&ColorInfo::REC709).uniform_bytes([1.0, 0.0, 0.0, 1.0], [0.0, 0.0], true, [1.0, 1000.0, 1.0, 0.0]);
         assert_eq!(bytes.len(), 24 * 4);
         let flag = f32::from_le_bytes([bytes[72], bytes[73], bytes[74], bytes[75]]);
         assert_eq!(flag, 1.0, "flag de linearização no float 18");
         let mode = f32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]);
         let peak = f32::from_le_bytes([bytes[84], bytes[85], bytes[86], bytes[87]]);
+        let operator = f32::from_le_bytes([bytes[88], bytes[89], bytes[90], bytes[91]]);
         assert_eq!((mode, peak), (1.0, 1000.0), "linha de tonemap nos floats 20/21");
+        assert_eq!(operator, 1.0, "operador de tonemap no float 22");
     }
 }

@@ -102,7 +102,7 @@ fn main() -> eframe::Result<()> {
     if let Some(icon) = load_icon() {
         viewport = viewport.with_icon(icon);
     }
-    // O `mut` só é usado pelo bloco cfg(windows) que configura o wgpu.
+    // O `mut` só é usado pelos blocos que configuram o wgpu abaixo.
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
     // Renderer wgpu no Windows (eframe 0.37 já traz wgpu com os backends
@@ -123,6 +123,21 @@ fn main() -> eframe::Result<()> {
             create.instance_descriptor.backend_options.dx12.shader_compiler = Dx12Compiler::Fxc;
         }
         options.renderer = eframe::Renderer::Wgpu;
+    }
+    // Pipeline de vídeo 10-bit: a textura `R16Unorm` só existe com a feature
+    // `TEXTURE_FORMAT_16BIT_NORM`. Pede quando o adapter tem (em Windows e
+    // Linux); sem ela o `VideoGpu` cai para `R8Unorm` sem quebrar o playback.
+    {
+        use eframe::egui_wgpu::WgpuSetup;
+        use eframe::wgpu::Features;
+        if let WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup {
+            let base = Arc::clone(&create.device_descriptor);
+            create.device_descriptor = Arc::new(move |adapter| {
+                let mut descriptor = base(adapter);
+                descriptor.required_features |= adapter.features() & Features::TEXTURE_FORMAT_16BIT_NORM;
+                descriptor
+            });
+        }
     }
     eframe::run_native(
         APP_ID,
@@ -1016,7 +1031,8 @@ impl PlayerApp {
     fn stats_overlay(&self, ui: &egui::Ui, rect: egui::Rect) {
         let s = self.metrics.snapshot();
         let hdr = self.video_gpu.as_ref().and_then(|g| g.tone_map()).map(|t| t.label());
-        let text = stats_text(&s, self.position, self.duration, hdr.as_deref());
+        let pipeline = self.video_gpu.as_ref().and_then(|g| g.pipeline_label());
+        let text = stats_text(&s, self.position, self.duration, hdr.as_deref(), pipeline.as_deref());
         let galley = ui.painter().layout_no_wrap(text, egui::FontId::monospace(12.0), egui::Color32::from_gray(235));
         let pad = egui::vec2(10.0, 8.0);
         let bg = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 12.0), galley.size() + pad * 2.0);
@@ -1455,10 +1471,28 @@ impl eframe::App for PlayerApp {
             // A altura vem do ScrollArea `max_height` + `auto_shrink` vertical:
             // nada de `exact_size` com conta de margem de tema (era a fonte do
             // painel alto demais com 1 item).
+            //
+            // **Resize manual:** arrastar a borda superior troca o "altura do
+            // conteúdo" por uma altura fixa (`Playlist::panel_height`, salva no
+            // `playlist.json`) e a lista passa a preencher o painel rolando
+            // dentro. O `PanelState` do egui é limpo a cada frame: em modo
+            // automático quem manda é o conteúdo, e em modo manual o
+            // `default_size` (a altura salva) — sem isso o estado persistido
+            // (do tamanho anterior) venceria o default e o painel voltaria
+            // sozinho depois do arrasto.
+            let panel_id = ui.scope_id().with("playlist");
+            let resize_id = panel_id.with("__resize");
+            let manual = self.playlist.panel_height;
+            ui.ctx().data_mut(|d| d.remove::<egui::PanelState>(panel_id));
             let rows = self.playlist.files.len().clamp(1, PLAYLIST_MAX_ROWS);
             let spacing_y = ui.spacing().item_spacing.y;
-            let list_h = rows as f32 * PLAYLIST_ROW_H + rows.saturating_sub(1) as f32 * spacing_y;
-            egui::containers::Panel::bottom("playlist").resizable(false).show(ui, |ui| {
+            let auto_list_h = rows as f32 * PLAYLIST_ROW_H + rows.saturating_sub(1) as f32 * spacing_y;
+            let max_h = (ui.available_height() * 0.7).max(PLAYLIST_MIN_H);
+            let mut panel = egui::containers::Panel::bottom("playlist").resizable(true).min_size(PLAYLIST_MIN_H).max_size(max_h);
+            if let Some(h) = manual {
+                panel = panel.default_size(clamp_playlist_height(h, max_h));
+            }
+            let shown = panel.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.strong(t(Key::Items));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1486,7 +1520,14 @@ impl eframe::App for PlayerApp {
                         }
                     });
                 });
-                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+                let list_h = if manual.is_some() {
+                    // Painel redimensionado: a lista preenche o espaço que
+                    // sobra (e rola dentro dele).
+                    (ui.available_height() - PLAYLIST_BREATHING).max(PLAYLIST_ROW_H)
+                } else {
+                    auto_list_h
+                };
+                egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, manual.is_none()]).show(ui, |ui| {
                     // Sem clone por frame: só os índices.
                     for i in 0..self.playlist.files.len() {
                         let name = file_name(&self.playlist.files[i]);
@@ -1500,6 +1541,22 @@ impl eframe::App for PlayerApp {
                 });
                 ui.add_space(PLAYLIST_BREATHING);
             });
+            // O arrasto da borda é do próprio `Panel`; aqui só latchamos a
+            // altura resultante. Grava no json apenas ao soltar (nada de write
+            // por frame de arrasto). Duplo-clique na alça volta para a altura
+            // automática (acompanha o conteúdo), sem precisar editar o json.
+            if let Some(resize) = ui.ctx().read_response(resize_id) {
+                if resize.double_clicked() {
+                    self.playlist.panel_height = None;
+                    resume::save_playlist(&self.playlist);
+                } else if resize.dragged() || resize.drag_stopped() {
+                    let h = clamp_playlist_height(shown.response.rect.height(), max_h);
+                    self.playlist.panel_height = Some(h);
+                    if resize.drag_stopped() {
+                        resume::save_playlist(&self.playlist);
+                    }
+                }
+            }
         }
 
         // Centro: vídeo (paint callback wgpu) ou a dica de áudio/playlist.
@@ -1601,11 +1658,27 @@ fn ghost(ui: &mut egui::Ui, label: &str) -> egui::Response {
 /// Altura de uma linha da playlist (mesma de [`playlist_row`]).
 const PLAYLIST_ROW_H: f32 = 22.0;
 /// Linhas visíveis antes de a lista rolar dentro do painel (~4 linhas: abre
-/// pasta sem tomar a tela; o resize manual do painel é pendência documentada no
-/// ROADMAP — o painel acompanha o conteúdo, não tem grip).
+/// pasta sem tomar a tela). Depois de um resize manual quem manda é a altura
+/// escolhida pelo usuário (`Playlist::panel_height`).
 const PLAYLIST_MAX_ROWS: usize = 4;
 /// Respiro embaixo da lista (o painel encosta na barra de controles).
 const PLAYLIST_BREATHING: f32 = 6.0;
+/// Menor altura que o painel da playlist aceita num resize manual: cabeçalho
+/// (rótulo + botões) + uma linha. Abaixo disso não sobra nada legível.
+const PLAYLIST_MIN_H: f32 = 56.0;
+
+/// Altura de um painel de playlist redimensionado à mão, presa entre o mínimo
+/// legível e o teto da janela. Valor inválido (json editado à mão) cai no
+/// mínimo em vez de virar NaN no layout.
+fn clamp_playlist_height(height: f32, max_h: f32) -> f32 {
+    let lo = PLAYLIST_MIN_H.min(max_h);
+    let hi = max_h.max(lo);
+    if height.is_finite() {
+        height.clamp(lo, hi)
+    } else {
+        lo
+    }
+}
 
 /// Linha da playlist: largura toda, altura fixa e o par hover/seleção do tema
 /// (mesmo tratamento de lista dos irmãos, com o caminho completo no tooltip).
@@ -1707,7 +1780,7 @@ fn window_video_px(width: u32, height: u32, par: (u32, u32), rotation: u8) -> (u
 /// Unidade por linha (todo campo de tempo em ms; fps e Hz separados) e
 /// `pos`/`dura` com o relógio mestre contra a duração da faixa — diagnóstico
 /// sem virar planilha embaralhada.
-fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64, hdr: Option<&str>) -> String {
+fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64, hdr: Option<&str>, pipeline: Option<&str>) -> String {
     let mut rows: Vec<(&str, Vec<String>)> = Vec::new();
     if let Some(t) = &s.track {
         rows.push((
@@ -1717,6 +1790,7 @@ fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64, hdr: Option<&
                 format!("{}x{}", t.width, t.height),
                 format!("{:.3} fps", t.fps),
                 t.container.clone(),
+                t.pixel_format.clone().unwrap_or_else(|| "-".into()),
             ],
         ));
         rows.push((
@@ -1731,6 +1805,10 @@ fn stats_text(s: &metrics::Snapshot, position: f64, duration: f64, hdr: Option<&
     // Só HDR: em SDR a linha não existe (overlay idêntico ao de antes).
     if let Some(hdr) = hdr {
         rows.push(("hdr", vec![hdr.to_owned()]));
+    }
+    // Caminho de amostra do último upload (8/10 bits → R8/R16Unorm).
+    if let Some(pipeline) = pipeline {
+        rows.push(("pipeline", vec![pipeline.to_owned()]));
     }
     rows.push(("hwdec", vec![s.hw.summary(), format!("{} frames", s.hw.frames)]));
     // Sem duração do motor, a do container serve; posição pode passar do fim
@@ -1833,12 +1911,12 @@ mod tests {
     #[test]
     fn overlay_mostra_pos_e_duracao() {
         let snapshot = metrics::Snapshot::default();
-        let text = stats_text(&snapshot, 65.0, 130.0, None);
+        let text = stats_text(&snapshot, 65.0, 130.0, None, None);
         assert!(text.contains("pos"), "{text}");
         assert!(text.contains("1:05 / 2:10"), "{text}");
         assert!(text.contains("50.0%"), "{text}");
         // Sem duração não inventa percentual.
-        let text = stats_text(&snapshot, 5.0, 0.0, None);
+        let text = stats_text(&snapshot, 5.0, 0.0, None, None);
         assert!(text.contains("0:05 / 0:00"), "{text}");
         assert!(text.contains("0.0%"), "{text}");
     }
@@ -1850,7 +1928,7 @@ mod tests {
             hw: metrics::HwUsage { mode: metrics::HwMode::Hardware, backend: Some("Media Foundation"), frames: 12, ..Default::default() },
             ..Default::default()
         };
-        let text = stats_text(&snapshot, 0.0, 0.0, None);
+        let text = stats_text(&snapshot, 0.0, 0.0, None, None);
         assert!(text.contains("hwdec"), "{text}");
         assert!(text.contains("Media Foundation · hardware"), "{text}");
         assert!(text.contains("12 frames"), "{text}");
@@ -1861,11 +1939,44 @@ mod tests {
     #[test]
     fn overlay_mostra_tonemap_hdr() {
         let snapshot = metrics::Snapshot::default();
-        let text = stats_text(&snapshot, 0.0, 0.0, Some("pq -> sdr hable (1000 nits)"));
+        let text = stats_text(&snapshot, 0.0, 0.0, Some("pq -> sdr bt2390 (1000 nits)"), None);
         assert!(text.contains("hdr"), "{text}");
-        assert!(text.contains("pq -> sdr hable (1000 nits)"), "{text}");
-        let sdr = stats_text(&snapshot, 0.0, 0.0, None);
+        assert!(text.contains("pq -> sdr bt2390 (1000 nits)"), "{text}");
+        let sdr = stats_text(&snapshot, 0.0, 0.0, None, None);
         assert!(!sdr.contains("hdr"), "{sdr}");
+    }
+
+    /// O overlay mostra o pixfmt do container e o caminho de amostra do último
+    /// upload (é a instrumentação do pipeline de 10 bits).
+    #[test]
+    fn overlay_mostra_pixfmt_e_pipeline() {
+        let snapshot = metrics::Snapshot {
+            track: Some(metrics::TrackInfo {
+                container: "matroska".into(),
+                video_codec: Some("hevc".into()),
+                pixel_format: Some("YUV 4:2:0 10-bit".into()),
+                width: 1920,
+                height: 1080,
+                fps: 23.976,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let text = stats_text(&snapshot, 0.0, 0.0, None, Some("10-bit yuv -> r16unorm"));
+        assert!(text.contains("YUV 4:2:0 10-bit"), "{text}");
+        assert!(text.contains("10-bit yuv -> r16unorm"), "{text}");
+    }
+
+    /// O resize da playlist prende a altura entre o mínimo legível e o teto da
+    /// janela; valor inválido cai no mínimo (não vira NaN no layout).
+    #[test]
+    fn altura_da_playlist_respeita_limites() {
+        assert_eq!(clamp_playlist_height(200.0, 400.0), 200.0);
+        assert_eq!(clamp_playlist_height(10.0, 400.0), PLAYLIST_MIN_H);
+        assert_eq!(clamp_playlist_height(9999.0, 400.0), 400.0);
+        assert_eq!(clamp_playlist_height(f32::NAN, 400.0), PLAYLIST_MIN_H);
+        // janela menor que o mínimo: o teto manda (nunca min > max).
+        assert_eq!(clamp_playlist_height(200.0, 30.0), 30.0);
     }
 
     /// O botão "Retomar" só aparece fora das bordas: pelo menos 10 s de faixa

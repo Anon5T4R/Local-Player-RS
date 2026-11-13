@@ -27,7 +27,7 @@ use filmcraft_media::{FrameRequest, SharedReader, SharedSource};
 use filmcraft_time::Tick;
 
 use crate::metrics::Metrics;
-use crate::video::Frame;
+use crate::video::{Frame, Planes};
 
 use super::decoder::{AudioSource, Chunk, Seeked};
 use super::error::EngineError;
@@ -441,17 +441,26 @@ fn worker(source: SharedSource, info: VideoInfo, start: f64, io: Iface) {
     }
 }
 
-/// Extrai os planos YUV8 do frame do hub (Yuv16 vira 8 bits aqui, na thread de
-/// decode; RGBA não é suportado na saída de vídeo da fase 3).
+/// Extrai os planos do frame do hub: 8 bits vai direto (os buffers do cache são
+/// compartilhados por `Arc`), 10–16 bits é convertido para amostra `R16Unorm` na
+/// thread de decode (o único lugar que paga a cópia). RGBA não é suportado na
+/// saída de vídeo da fase 3.
 fn frame_planes(frame: &VideoFrame, pts: f64) -> Result<Frame, String> {
     let (width, height) = (frame.width, frame.height);
     match &frame.data {
-        PixelData::Yuv8 { planes, chroma, .. } => Ok(Frame { width, height, chroma: *chroma, planes: planes.clone(), color: frame.color, pts }),
+        PixelData::Yuv8 { planes, chroma, .. } => {
+            Ok(Frame { width, height, chroma: *chroma, bits: 8, planes: Planes::U8(planes.clone()), color: frame.color, pts })
+        }
         PixelData::Yuv16 { planes, chroma, bits, .. } => Ok(Frame {
             width,
             height,
             chroma: *chroma,
-            planes: [Arc::new(shift_to_8(&planes[0], *bits)), Arc::new(shift_to_8(&planes[1], *bits)), Arc::new(shift_to_8(&planes[2], *bits))],
+            bits: *bits,
+            planes: Planes::U16([
+                Arc::new(to_unorm16(&planes[0], *bits, frame.color.range)),
+                Arc::new(to_unorm16(&planes[1], *bits, frame.color.range)),
+                Arc::new(to_unorm16(&planes[2], *bits, frame.color.range)),
+            ]),
             color: frame.color,
             pts,
         }),
@@ -459,21 +468,28 @@ fn frame_planes(frame: &VideoFrame, pts: f64) -> Result<Frame, String> {
     }
 }
 
-/// `u16` de `bits` bits → `u8` (mantém os 8 bits altos, com arredondamento).
+/// `u16` de `bits` bits → amostra `R16Unorm` em bytes little-endian.
 ///
-/// HDR em 10/12 bits ainda desce para 8 bits aqui (a textura do pipeline é
-/// `R8Unorm`): arredondar em vez de truncar tira ~meio LSB de viés e suaviza um
-/// pouco o banding das cenas escuras típicas de PQ. Subir o pipeline inteiro
-/// para `R16Unorm` fica para uma iteração própria (muda `Frame`, formato das
-/// texturas e o dobro de banda no upload).
-fn shift_to_8(plane: &[u16], bits: u32) -> Vec<u8> {
-    let shift = bits.saturating_sub(8).min(8);
-    if shift == 0 {
-        return plane.iter().map(|v| (*v).min(u8::MAX as u16) as u8).collect();
+/// O shader usa a matriz de 8 bits ([`crate::video::color::yuv_to_rgb`]): a
+/// amostra tem que valer `código de 8 bits / 255`. Na faixa limitada o código
+/// de 10 bits `v` equivale ao de 8 bits `v/4` (preto 64, branco 940 — os dois
+/// escalam por `2^(bits-8)`), então a amostra é `v / (255·2^(bits-8))`; na
+/// faixa completa é `v / (2^bits − 1)`. É a mesma convenção do `normalize_y` /
+/// `normalize_c` do `filmcraft_color`. Valores acima do branco nominal (super
+/// white do HDR) saturam em 65535, como o clamp do shader faria.
+fn to_unorm16(plane: &[u16], bits: u32, range: filmcraft_color::Range) -> Vec<u8> {
+    let bits = bits.clamp(8, 16);
+    let denom = match range {
+        filmcraft_color::Range::Limited => 255.0 * (1u32 << (bits - 8)) as f32,
+        filmcraft_color::Range::Full => ((1u32 << bits) - 1) as f32,
+    };
+    let scale = 65535.0 / denom;
+    let mut out = Vec::with_capacity(plane.len() * 2);
+    for &v in plane {
+        let s = ((f32::from(v) * scale).round().clamp(0.0, 65535.0)) as u16;
+        out.extend_from_slice(&s.to_le_bytes());
     }
-    let half = 1u16 << (shift - 1);
-    let mask = (1u16 << shift) - 1;
-    plane.iter().map(|v| ((*v >> shift) + u16::from((*v & mask) >= half)).min(u8::MAX as u16) as u8).collect()
+    out
 }
 
 #[cfg(test)]
@@ -490,18 +506,61 @@ mod tests {
         }
     }
 
+    /// Ler uma amostra little-endian do plano convertido e normalizar como a
+    /// textura `R16Unorm` faz (0..1).
+    fn sample(bytes: &[u8], i: usize) -> f32 {
+        f32::from(u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]])) / 65535.0
+    }
+
+    /// 10 bits limitado → amostra na convenção do shader: preto 64 e branco 940
+    /// da matriz de 8 bits, croma neutro em 512. E a matriz aplicada à amostra
+    /// devolve branco/preto/neutro exatos — valida a convenção ponta a ponta.
     #[test]
-    fn yuv16_desce_para_8_bits() {
-        // 10 bits: 0, 512 e 1023 → 0, 128, 255.
-        assert_eq!(shift_to_8(&[0, 512, 1023], 10), vec![0, 128, 255]);
-        // 10 bits arredonda (514 → 128,5 → 129) em vez de truncar.
-        assert_eq!(shift_to_8(&[513, 514, 515], 10), vec![128, 129, 129]);
-        // 8 bits passa direto.
-        assert_eq!(shift_to_8(&[1, 200, 255], 8), vec![1, 200, 255]);
-        // valores acima do esperado não estouram o u8.
-        assert_eq!(shift_to_8(&[65_535], 16), vec![255]);
-        // arredondar no topo não passa de 255
-        assert_eq!(shift_to_8(&[65_534], 16), vec![255]);
+    fn unorm16_limitado_bate_com_a_matriz() {
+        let plane = [64u16, 940, 512, 1023];
+        let out = to_unorm16(&plane, 10, filmcraft_color::Range::Limited);
+        assert_eq!(out.len(), 8);
+        // preto limitado 64 → 16/255; branco 940 → 235/255; neutro 512 → 128/255.
+        assert!((sample(&out, 0) - 16.0 / 255.0).abs() < 1e-5);
+        assert!((sample(&out, 1) - 235.0 / 255.0).abs() < 1e-5);
+        assert!((sample(&out, 2) - 128.0 / 255.0).abs() < 1e-5);
+        // super white (1023) satura em branco.
+        assert_eq!(sample(&out, 3), 1.0);
+
+        let m = crate::video::color::yuv_to_rgb(&filmcraft_color::ColorInfo {
+            range: filmcraft_color::Range::Limited,
+            ..filmcraft_color::ColorInfo::REC709
+        });
+        let white = m.apply_normalized(sample(&out, 1), sample(&out, 2), sample(&out, 2));
+        let black = m.apply_normalized(sample(&out, 0), sample(&out, 2), sample(&out, 2));
+        for (got, want) in white.iter().zip([1.0, 1.0, 1.0]) {
+            assert!((got - want).abs() < 1e-4, "branco 10-bit: {white:?}");
+        }
+        for (got, want) in black.iter().zip([0.0, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-4, "preto 10-bit: {black:?}");
+        }
+    }
+
+    /// 10 bits de faixa completa: código/1023 direto (0 → 0, 1023 → 1).
+    #[test]
+    fn unorm16_faixa_completa() {
+        let out = to_unorm16(&[0, 512, 1023], 10, filmcraft_color::Range::Full);
+        assert_eq!(sample(&out, 0), 0.0);
+        assert!((sample(&out, 2) - 1.0).abs() < 1e-6);
+        assert!((sample(&out, 1) - 512.0 / 1023.0).abs() < 1e-4);
+        // 12 bits limitado: branco 235·16 = 3760 também cai em 235/255.
+        let out = to_unorm16(&[64 * 16, 3760], 12, filmcraft_color::Range::Limited);
+        assert!((sample(&out, 1) - 235.0 / 255.0).abs() < 1e-5);
+    }
+
+    /// 8 bits passa direto (não entra nesta função, mas o clamps/limites valem
+    /// se um decodificador entregar Yuv16 de 8 bits).
+    #[test]
+    fn unorm16_de_8_bits() {
+        let out = to_unorm16(&[0, 128, 255], 8, filmcraft_color::Range::Limited);
+        for i in 0..3 {
+            assert!((sample(&out, i) - [0.0f32, 128.0 / 255.0, 1.0][i]).abs() < 1e-5);
+        }
     }
 
     /// Gera um Y4M minúsculo (4:2:0) com `frames` quadros e grava no temp.
@@ -548,8 +607,9 @@ mod tests {
                 Ok(VideoMsg::Frame { frame, generation }) => {
                     assert_eq!(generation, 0);
                     assert_eq!((frame.width, frame.height), (w, h));
-                    assert_eq!(frame.planes[0].len(), (w * h) as usize);
-                    assert_eq!(frame.planes[1].len(), ((w.div_ceil(2)) * h.div_ceil(2)) as usize);
+                    assert_eq!(frame.bits, 8);
+                    assert_eq!(frame.planes.samples(0), (w * h) as usize);
+                    assert_eq!(frame.planes.samples(1), ((w.div_ceil(2)) * h.div_ceil(2)) as usize);
                     frames += 1;
                 }
                 Ok(VideoMsg::End { .. }) => break,

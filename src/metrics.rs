@@ -41,6 +41,8 @@ pub struct TrackInfo {
     pub container: String,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
+    /// Formato de pixel declarado pelo container (`yuv420p10le`, `YUV 4:2:0 10-bit`).
+    pub pixel_format: Option<String>,
     pub width: u32,
     pub height: u32,
     pub fps: f64,
@@ -59,6 +61,7 @@ impl TrackInfo {
             container: info.container.clone(),
             video_codec: video.map(|v| v.codec.clone()),
             audio_codec: info.audio().map(|a| a.codec.clone()),
+            pixel_format: video.map(|v| v.pixel_format.clone()).filter(|p| !p.is_empty()),
             width: video.map_or(0, |v| v.width),
             height: video.map_or(0, |v| v.height),
             fps: video.map_or(0.0, |v| v.frame_rate.sane().as_f64()),

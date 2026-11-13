@@ -49,6 +49,23 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
       nos pontos da spec; overlay D mostra `hdr pq -> sdr hable (N nits)`. 8-bit mantido
       (shift_to_8 agora arredonda; pipeline R16Unorm/10-bit e BT.2390/maxRGB documentados
       como evolução). Gamut BT.2020→709 segue fora.
+- [x] **8b. Pipeline 10-bit + tonemap BT.2390 + resize da playlist (v0.6.0)** —
+      **10 bits de verdade:** HEVC Main 10 / 12 bits deixam de descer para 8 bits na thread de
+      decode. `Frame` carrega `Planes::U16` (amostra `R16Unorm` na convenção de código de 8 bits, com
+      faixa limitada e completa tratadas separadamente) e a GPU usa textura `R16Unorm` — a feature
+      `TEXTURE_FORMAT_16BIT_NORM` é pedida no device descriptor; device que não a tenha cai para
+      `R8Unorm` no upload (byte alto), sem quebrar o playback, e o overlay D mostra qual caminho
+      está ativo. 8 bits continua `R8Unorm`; a matriz YUV→RGB e o shader não mudaram (teste aplica a
+      matriz à amostra de 10 bits: branco/preto/neutro exatos).
+      **BT.2390 passa a ser o operador default** (EETF no domínio PQ sobre max(R,G,B), ganho único
+      nos três canais → matiz preservado, joelho que não escurece os tons médios; Hable continua
+      disponível em `LOCALPLAYER_HDR_TONEMAP=hable`). Matemática espelhada em CPU e testada contra o
+      `bt2390_eetf` do `filmcraft_color`.
+      **Resize manual do painel `Itens`:** arrastar a borda superior fixa a altura (salva em
+      `playlist.json`), a lista preenche o painel e rola dentro; duplo-clique na alça volta para a
+      altura automática (acompanha o conteúdo). Overlay D ganhou o `pixfmt` do container e a linha
+      `pipeline` (`10-bit 4:2:0 yuv -> r16unorm`). QA com fixtures HEVC Main 10 geradas por ffmpeg
+      em `test-files/LocalMedia/10bit/` (HDR10 PQ 720p e SDR 10-bit).
 - [ ] **8. Maturação restante** - VFR, extração do motor como crate, contribuição dos
       patches upstream (`docs/upstream/`). Legenda embutida: feita na 5c.
 - [x] **9. Janela no tamanho do vídeo** (pedido do João; dev, pós-v0.3.0) — na abertura de uma
@@ -113,16 +130,14 @@ Sucessor pure-Rust do Local-Player (mpv + IPC). Plano completo:
 
 - **hwdec 4K HEVC** — MF/DXVA cobre Main/Main 10 e VP9/AV1; falta validar 4K HEVC real em
   hardware (o SW pode não segurar sozinho, e o readback GPU→CPU cresce com a resolução).
-- **HDR → SDR tonemap** — ✅ v0.5.0 (Hable filmic; 8-bit com arredondamento — banding em
-  cenas escuras até o pipeline R16Unorm; gamut 2020→709 pendente).
+- **HDR → SDR tonemap** — ✅ v0.6.0: BT.2390 é o default (Hable opcional por env) e o pipeline
+  mantém 10 bits (`R16Unorm`) até o tonemap — o banding de PQ em 8 bits saiu. Gamut 2020→709
+  continua pendente.
 - **VFR** — o pipeline assume a taxa nominal declarada pelo container.
 - **ASS** — básico (styles/cores/\an/contorno); `\pos`/`\move`/`\fad`/karaokê/`\t`/desenho
   ignorados (avisos no stderr); sem colisão de linhas nem quebra automática.
 - **Hot-swap de device de áudio** — trocar a saída exige reabrir faixa/app.
 - **Gapless** — auto-avanço da playlist funciona, mas sem gapless fora de MP3.
-- **Resize do painel `Itens`** — o painel acompanha o conteúdo com cap fixo de 4 linhas + scroll;
-  sem grip de redimensionamento (o `Panel` do craft não persiste um tamanho que conviva com a
-  altura automática do conteúdo). Pedido do João: avaliar quando o padrão craft expuser isso.
 - **Legenda embutida** — suporta texto (SRT/VTT/ASS do MKV e tx3g do MP4). Faixas bitmap
   (PGS/VobSub) são listadas no `--probe` e ignoradas no player; `wvtt` em MP4 (amostras em caixas)
   ainda não é interpretado.

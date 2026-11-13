@@ -109,7 +109,10 @@ impl SessionLog {
         // Cada faixa decide de novo: o modo de hwdec é registrado quando conhecido.
         st.hw_logged = None;
         let video = match (&info.video_codec, info.width, info.height) {
-            (Some(c), w, h) if w > 0 && h > 0 => format!("{c} {w}x{h} {:.3}fps", info.fps),
+            (Some(c), w, h) if w > 0 && h > 0 => {
+                let pixfmt = info.pixel_format.as_deref().map_or(String::new(), |p| format!(" {p}"));
+                format!("{c} {w}x{h} {:.3}fps{pixfmt}", info.fps)
+            }
             (Some(c), _, _) => (*c).clone(),
             _ => "-".to_string(),
         };
@@ -504,6 +507,7 @@ mod tests {
             container: "matroska".into(),
             video_codec: Some("h264".into()),
             audio_codec: Some("opus".into()),
+            pixel_format: Some("yuv420p10le".into()),
             width: 1920,
             height: 1080,
             fps: 23.976,
@@ -526,7 +530,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(text.contains("session start"), "{text}");
         assert!(text.contains("track file=\"C:\\filme 'x'.mkv\" container=matroska"), "{text}");
-        assert!(text.contains("1920x1080 23.976fps"), "{text}");
+        assert!(text.contains("1920x1080 23.976fps yuv420p10le"), "{text}");
         assert!(text.contains("event=stall reason=recovered"), "{text}");
         assert!(text.contains("drops=6"), "o burst entra no episódio: {text}");
         assert!(text.contains("event=drop_burst n=6 ring=3"), "{text}");
