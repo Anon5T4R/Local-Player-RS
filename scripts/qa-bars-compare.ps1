@@ -21,7 +21,7 @@ public class W2 {
 "@
 
 function Shot-Window([string]$media, [string]$png) {
-  $proc = Start-Process -FilePath $exe -ArgumentList @($media) -PassThru
+  $proc = Start-Process -FilePath $exe -ArgumentList ('"' + $media + '"') -PassThru
   Start-Sleep -Seconds 5
   $proc.Refresh()
   $hwnd = $proc.MainWindowHandle
