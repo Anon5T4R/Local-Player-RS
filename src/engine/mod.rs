@@ -706,6 +706,7 @@ fn open_track_media(path: &str, start_at: f64, rate: u32, metrics: &Arc<Metrics>
             container: ext.clone(),
             video_codec: None,
             audio_codec: Some(ext),
+            pixel_format: None,
             width: 0,
             height: 0,
             fps: 0.0,

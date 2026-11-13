@@ -179,7 +179,9 @@ fn print_help(out: &mut dyn Write) {
          \x20 tecla D               overlay de estatísticas no vídeo\n\
          \x20 LOCALPLAYER_STATS=<arquivo.csv|1>   uma linha por segundo\n\
          \x20 LOCALPLAYER_FRAME_CACHE_MB=<MB>     teto do cache de frames (padrão 128)\n\
-         \x20 LOCALPLAYER_DECODE_THREADS=<N>      threads de decode / pool (padrão 0 = todos)",
+         \x20 LOCALPLAYER_DECODE_THREADS=<N>      threads de decode / pool (padrão 0 = todos)\n\
+         \x20 LOCALPLAYER_HDR_PEAK=<nits>         pico do tonemap PQ (padrão 1000)\n\
+         \x20 LOCALPLAYER_HDR_TONEMAP=<operador>  bt2390 (padrão) ou hable",
         env!("CARGO_PKG_VERSION")
     );
 }

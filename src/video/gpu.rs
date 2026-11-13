@@ -6,8 +6,17 @@
 //! dos pixels convertidos) num retângulo letterboxed.
 //!
 //! Um único [`VideoGpu`] é compartilhado entre a UI (upload) e o callback
-//! (paint) por `Arc<Mutex<…>>`; as texturas só são recriadas quando o tamanho
-//! ou o formato de croma muda.
+//! (paint) por `Arc<Mutex<…>>`; as texturas só são recriadas quando o tamanho,
+//! o croma ou o formato de amostra muda.
+//!
+//! ## Profundidade de bits
+//!
+//! 8 bits usa `R8Unorm`; 10/12 bits usa `R16Unorm` e preserva a precisão real
+//! até o tonemap (o caminho antigo shiftava para 8 bits na thread de decode e
+//! o PQ em 8 bits fazia banding nas cenas escuras). `R16Unorm` exige a feature
+//! `TEXTURE_FORMAT_16BIT_NORM` — pedida no arranque (src/main.rs); num device
+//! que não a tenha o upload cai para `R8Unorm` (high byte da amostra), sem
+//! quebrar o playback. O overlay da tecla D mostra o caminho em uso.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -16,16 +25,17 @@ use eframe::egui_wgpu::{CallbackResources, CallbackTrait};
 
 use super::color::yuv_to_rgb;
 use super::geometry::{self, Rect};
-use super::tone::{self, ToneMapMode, ToneMapParams};
-use super::{chroma_dims, Frame};
+use super::tone::{self, Operator, ToneMapMode, ToneMapParams};
+use super::{chroma_dims, Frame, Planes};
 
-/// Texturas planas do frame atual (Y, U, V).
+/// Uma textura plana do frame atual.
 struct Textures {
     y: wgpu::Texture,
     u: wgpu::Texture,
     v: wgpu::Texture,
     size: (u32, u32),
     chroma: filmcraft_frame::Chroma,
+    format: wgpu::TextureFormat,
 }
 
 struct Inner {
@@ -48,9 +58,15 @@ struct Inner {
     linearize: bool,
     /// Pico default do PQ (env `LOCALPLAYER_HDR_PEAK`, lido no arranque).
     tone_peak: f32,
+    /// Operador de tonemap (env `LOCALPLAYER_HDR_TONEMAP`; default BT.2390).
+    tone_operator: Operator,
     /// Pico sinalizado pelo container (`MaxCLL`/mastering display) do frame
     /// atual; vence o env quando existe.
     frame_peak: Option<f32>,
+    /// `R16Unorm` é aceito por este device (`TEXTURE_FORMAT_16BIT_NORM`).
+    unorm16: bool,
+    /// Formato do último upload (rótulo da origem, bits e textura) para o overlay.
+    pixel: Option<(String, u32, wgpu::TextureFormat)>,
     /// Maior lado que o device aceita (≤ 8K).
     max_side: u32,
 }
@@ -58,7 +74,7 @@ struct Inner {
 impl Inner {
     /// Parâmetros de HDR do frame atual (SDR → `Off`, sem tonemap).
     fn tone_params(&self) -> ToneMapParams {
-        ToneMapParams::for_color(&self.color, self.frame_peak.unwrap_or(self.tone_peak))
+        ToneMapParams::for_color(&self.color, self.frame_peak.unwrap_or(self.tone_peak), self.tone_operator)
     }
 
     fn write_uniform(&self) {
@@ -68,10 +84,11 @@ impl Inner {
         self.queue.write_buffer(&self.uniform, 0, &matrix.uniform_bytes(uv, offset, self.linearize, tone));
     }
 
-    /// (Re)cria texturas, views e bind group quando o frame muda de tamanho/croma.
-    fn ensure_textures(&mut self, width: u32, height: u32, chroma: filmcraft_frame::Chroma) {
+    /// (Re)cria texturas, views e bind group quando tamanho, croma ou formato
+    /// de amostra mudam.
+    fn ensure_textures(&mut self, width: u32, height: u32, chroma: filmcraft_frame::Chroma, format: wgpu::TextureFormat) {
         if let Some(t) = &self.textures {
-            if t.size == (width, height) && t.chroma == chroma {
+            if t.size == (width, height) && t.chroma == chroma && t.format == format {
                 return;
             }
         }
@@ -83,7 +100,7 @@ impl Inner {
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::R8Unorm,
+                format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
@@ -103,7 +120,7 @@ impl Inner {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.sampler) },
             ],
         });
-        self.textures = Some(Textures { y, u, v, size: (width, height), chroma });
+        self.textures = Some(Textures { y, u, v, size: (width, height), chroma, format });
         self.bind_group = Some(bind_group);
     }
 }
@@ -138,14 +155,23 @@ impl std::fmt::Display for UploadError {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ToneMapStatus {
     pub mode: ToneMapMode,
+    pub operator: Operator,
     pub peak_nits: f32,
 }
 
 impl ToneMapStatus {
     /// Linha do overlay, no inglês técnico da tecla D.
     pub fn label(self) -> String {
-        format!("{} -> sdr hable ({:.0} nits)", self.mode.label(), self.peak_nits)
+        format!("{} -> sdr {} ({:.0} nits)", self.mode.label(), self.operator.label(), self.peak_nits)
     }
+}
+
+/// Planos de um frame 16-bit quando o device não aceita `R16Unorm`: fica o byte
+/// alto de cada amostra little-endian — o código de 8 bits que o pipeline antigo
+/// já entregava (mesma convenção, ver [`crate::video::Planes`]).
+fn downconvert(planes: &Planes) -> [Arc<Vec<u8>>; 3] {
+    let high = |plane: usize| -> Arc<Vec<u8>> { Arc::new(planes.bytes(plane).iter().skip(1).step_by(2).copied().collect()) };
+    [high(0), high(1), high(2)]
 }
 
 impl VideoGpu {
@@ -249,6 +275,7 @@ impl VideoGpu {
             mapped_at_creation: false,
         });
         let max_side = device.limits().max_texture_dimension_2d.min(super::MAX_DIMENSION);
+        let unorm16 = device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM);
         Some(Self {
             inner: Arc::new(Mutex::new(Inner {
                 device: device.clone(),
@@ -265,7 +292,10 @@ impl VideoGpu {
                 par: (1, 1),
                 linearize: format.is_srgb(),
                 tone_peak: tone::env_peak_nits(),
+                tone_operator: tone::env_operator(),
                 frame_peak: None,
+                unorm16,
+                pixel: None,
                 max_side,
             })),
             aspect: Arc::new(Mutex::new(1.0)),
@@ -291,30 +321,39 @@ impl VideoGpu {
         }
         let (cw, ch) = chroma_dims(w, h, frame.chroma);
         let (need_y, need_c) = (w as usize * h as usize, cw as usize * ch as usize);
-        if frame.planes[0].len() < need_y || frame.planes[1].len() < need_c || frame.planes[2].len() < need_c {
+        if frame.planes.samples(0) < need_y || frame.planes.samples(1) < need_c || frame.planes.samples(2) < need_c {
             return Err(UploadError::Invalid("decoded frame planes are truncated".into()));
         }
-        g.ensure_textures(w, h, frame.chroma);
+        // 16 bits só quando a fonte tem >8 bits E o device aceita R16Unorm.
+        let u16_source = matches!(frame.planes, Planes::U16(_));
+        let unorm16 = u16_source && g.unorm16;
+        let format = if unorm16 { wgpu::TextureFormat::R16Unorm } else { wgpu::TextureFormat::R8Unorm };
+        g.ensure_textures(w, h, frame.chroma, format);
         let (y, u, v) = match &g.textures {
             Some(t) => (t.y.clone(), t.u.clone(), t.v.clone()),
             None => return Err(UploadError::Invalid("video textures missing".into())),
         };
+        // Sem R16Unorm: 16 bits descem para 8 aqui (alloc própria, só nesse device).
+        let down = (u16_source && !unorm16).then(|| downconvert(&frame.planes));
+        let bytes = |plane: usize| -> &[u8] { down.as_ref().map_or_else(|| frame.planes.bytes(plane), |d| d[plane].as_slice()) };
+        let bpp = if unorm16 { 2 } else { 1 };
         let write = |texture: &wgpu::Texture, data: &[u8], tw: u32, th: u32| {
             g.queue.write_texture(
                 wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 data,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(tw), rows_per_image: Some(th) },
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(tw * bpp), rows_per_image: Some(th) },
                 wgpu::Extent3d { width: tw, height: th, depth_or_array_layers: 1 },
             );
         };
-        write(&y, &frame.planes[0], w, h);
-        write(&u, &frame.planes[1], cw, ch);
-        write(&v, &frame.planes[2], cw, ch);
+        write(&y, bytes(0), w, h);
+        write(&u, bytes(1), cw, ch);
+        write(&v, bytes(2), cw, ch);
         g.color = frame.color;
         g.rotation = rotation % 4;
         g.size = (w, h);
         g.par = par;
         g.frame_peak = hdr_peak_nits.filter(|p| p.is_finite() && *p > 0.0);
+        g.pixel = Some((frame.format_label(), frame.bits, format));
         g.write_uniform();
         drop(g);
         *self.aspect.lock().unwrap_or_else(PoisonError::into_inner) = geometry::display_aspect(w, h, par, rotation);
@@ -340,7 +379,19 @@ impl VideoGpu {
     pub fn tone_map(&self) -> Option<ToneMapStatus> {
         let g = self.lock();
         let p = g.tone_params();
-        p.mode.is_active().then_some(ToneMapStatus { mode: p.mode, peak_nits: p.peak_nits })
+        p.mode.is_active().then_some(ToneMapStatus { mode: p.mode, operator: p.operator, peak_nits: p.peak_nits })
+    }
+
+    /// Caminho de amostra do último upload, para o overlay da tecla D
+    /// (`10-bit 4:2:0 yuv -> r16unorm`, `8-bit 4:2:0 yuv -> r8unorm`, ou a queda
+    /// para 8 bits num device sem `TEXTURE_FORMAT_16BIT_NORM`).
+    pub fn pipeline_label(&self) -> Option<String> {
+        let g = self.lock();
+        g.pixel.as_ref().map(|(origin, bits, format)| {
+            let target = if *format == wgpu::TextureFormat::R16Unorm { "r16unorm" } else { "r8unorm" };
+            let note = if *bits > 8 && *format != wgpu::TextureFormat::R16Unorm { " (device sem 16-bit norm)" } else { "" };
+            format!("{origin} yuv -> {target}{note}")
+        })
     }
 
     /// Shape do egui que pinta o frame dentro de `rect` (letterbox no callback).
@@ -380,6 +431,8 @@ impl CallbackTrait for VideoCallback {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     /// O WGSL precisa parsear e validar **na CPU**: um erro de shader só
     /// apareceria na criação do pipeline, no arranque do app (janela), nunca
     /// na UI de um teste comum.
@@ -388,5 +441,20 @@ mod tests {
         let module = naga::front::wgsl::parse_str(include_str!("yuv.wgsl")).expect("WGSL do vídeo precisa parsear");
         let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
         validator.validate(&module).expect("WGSL do vídeo precisa validar");
+    }
+
+    /// Sem `TEXTURE_FORMAT_16BIT_NORM` a amostra de 16 bits desce pelo byte alto
+    /// (little-endian): é exatamente o código de 8 bits que o pipeline antigo
+    /// entregava. 10-bit branco limitado (940) vira ~235; preto (64) vira ~16.
+    #[test]
+    fn queda_para_8_bits_usa_o_byte_alto() {
+        let sample = |v: u16| v.to_le_bytes();
+        let mut plane = Vec::new();
+        for v in [4112u16, 60395, 0, 65535] {
+            plane.extend_from_slice(&sample(v));
+        }
+        let planes = Planes::U16([Arc::new(plane), Arc::new(Vec::new()), Arc::new(Vec::new())]);
+        let out = downconvert(&planes);
+        assert_eq!(out[0].as_slice(), [16u8, 235, 0, 255]);
     }
 }

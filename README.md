@@ -28,9 +28,15 @@ Assets de cada release em
 
 ## O que toca
 
-- **Vídeo:** MP4/M4V/MOV, MKV, WebM, AVI e MPEG-TS — H.264, HEVC, AV1, VP8 e
-  VP9. Decode em software (sem hwdec ainda), YUV→RGB pelo shader WGSL do wgpu,
-  com letterbox e rotação em 90°.
+- **Vídeo:** MP4/M4V/MOV, MKV, WebM, AVI e MPEG-TS — H.264, HEVC (Main/Main 10),
+  AV1, VP8 e VP9. Hardware decode como primeira opção (Media Foundation/DXVA no
+  Windows, VA-API/NVDEC no Linux) com queda transparente para o decode em
+  software; YUV→RGB pelo shader WGSL do wgpu, com letterbox e rotação em 90°.
+- **HDR e 10 bits:** HEVC Main 10 / PQ / HLG, 10 e 12 bits **sem descer para
+  8 bits no caminho até a GPU** (textura `R16Unorm`) e tonemap **ITU-R BT.2390**
+  para SDR (default; `LOCALPLAYER_HDR_TONEMAP=hable` troca o operador). O pico
+  vem do `MaxCLL`/mastering display do container, depois de
+  `LOCALPLAYER_HDR_PEAK`, depois de 1000 nits. Gamut BT.2020→BT.709 segue fora.
 - **Áudio em arquivo:** MP3, FLAC, Opus, Vorbis, WAV/AIFF e M4A (AAC/ALAC).
 - **Áudio dentro de container de vídeo:** AAC, MP3, Opus, AC-3/E-AC-3, FLAC,
   Vorbis e PCM — a trilha toca junto com a imagem e é o relógio mestre.
@@ -92,7 +98,9 @@ linhas `event=…`:
 
 **Overlay ao vivo (tecla D)**: fps de decode e de exibição, drops (e quantos por
 atraso), atraso vs relógio, custo do upload, intervalo de repaint, RSS/pico e
-bytes no cache de frames.
+bytes no cache de frames. Com vídeo aberto ele também mostra o `pixfmt` do
+container, o caminho de amostra (`10-bit 4:2:0 yuv -> r16unorm`) e, em HDR, o
+tonemap ativo (`pq -> sdr bt2390 (1000 nits)`).
 
 **CSV por segundo** (opcional, o mais detalhado): `LOCALPLAYER_STATS=<arquivo.csv>`
 — ou `LOCALPLAYER_STATS=1` para gerar em `%TEMP%`. É o artefato mais útil para
@@ -117,6 +125,8 @@ upload/repaint".
 | --- | --- |
 | `LOCALPLAYER_FRAME_CACHE_MB` | teto do cache de frames decodificados (padrão 128; `0` volta ao teto do fork, 384 MB) |
 | `LOCALPLAYER_DECODE_THREADS` | máximo de threads dos decoders de vídeo (H.264/HEVC/VP9/AV1) e do pool do fork (padrão `0` = todos os núcleos). Em 1080p H.264, `2` ainda sobra ~4,7× de folga e libera CPU para a UI/áudio/outros programas |
+| `LOCALPLAYER_HDR_PEAK` | pico em nits usado pelo tonemap PQ quando o container não sinaliza `MaxCLL`/mastering display (padrão 1000; faixa 100–10 000) |
+| `LOCALPLAYER_HDR_TONEMAP` | operador de tonemap HDR→SDR: `bt2390` (padrão, mantém matiz e não escurece os tons médios) ou `hable` (filmic por canal, mais escuro) |
 
 **TLS do update é 100% Rust.** O check de release e o download do instalador usam
 o fork vendored do `rustls-rustcrypto` (pure Rust) como caminho único — nenhum

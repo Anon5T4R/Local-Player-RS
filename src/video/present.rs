@@ -71,6 +71,7 @@ pub fn take_due(queue: &mut VecDeque<Frame>, clock: f64, window: f64) -> Decisio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::Planes;
     use filmcraft_color::ColorInfo;
     use filmcraft_frame::Chroma;
     use std::sync::Arc;
@@ -80,7 +81,8 @@ mod tests {
             width: 1,
             height: 1,
             chroma: Chroma::C420,
-            planes: [Arc::new(vec![0]), Arc::new(vec![0]), Arc::new(vec![0])],
+            bits: 8,
+            planes: Planes::U8([Arc::new(vec![0]), Arc::new(vec![0]), Arc::new(vec![0])]),
             color: ColorInfo::REC709,
             pts,
         }

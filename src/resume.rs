@@ -16,6 +16,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct Playlist {
     pub files: Vec<String>,
+    /// Altura do painel `Itens` depois de um resize manual; `None` = altura do
+    /// conteúdo (o painel acompanha a lista). A UI valida a faixa ao desenhar.
+    #[serde(default)]
+    pub panel_height: Option<f32>,
 }
 
 /// Posição por arquivo (caminho absoluto → segundos em que parou).
@@ -66,7 +70,10 @@ fn write_json<T: Serialize>(name: &str, value: &T) {
 }
 
 pub fn load_playlist() -> Playlist {
-    read_json("playlist.json").unwrap_or_default()
+    let mut pl: Playlist = read_json("playlist.json").unwrap_or_default();
+    // json editado à mão: altura inválida volta para "automática".
+    pl.panel_height = pl.panel_height.filter(|h| h.is_finite() && *h > 0.0);
+    pl
 }
 
 pub fn save_playlist(pl: &Playlist) {
