@@ -1,7 +1,16 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["vendor/krilla", "vendor/hayro", "vendor/hayro-interpret", "vendor/hayro-syntax", "vendor/hayro-jbig2", "vendor/hayro-cmap", "vendor/hayro-postscript"]
+exclude = [
+    "crates/print",
+    "vendor/krilla",
+    "vendor/hayro",
+    "vendor/hayro-interpret",
+    "vendor/hayro-syntax",
+    "vendor/hayro-jbig2",
+    "vendor/hayro-cmap",
+    "vendor/hayro-postscript",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -68,18 +77,18 @@ hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-jbig2 = { path = "vendor/hayro-jbig2" }
 hayro-cmap = { path = "vendor/hayro-cmap" }
 hayro-postscript = { path = "vendor/hayro-postscript" }
-ecolor = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-emath = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-epaint = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui-winit = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_glow = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_extras = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-eframe = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "6d518fc799681571963842f95b55a6b68431b15a" }
-winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }
+ecolor = { path = "../egui/crates/ecolor/" }
+emath = { path = "../egui/crates/emath/" }
+epaint = { path = "../egui/crates/epaint/" }
+epaint_default_fonts = { path = "../egui/crates/epaint_default_fonts/" }
+egui = { path = "../egui/crates/egui/" }
+egui-winit = { path = "../egui/crates/egui-winit/" }
+egui-wgpu = { path = "../egui/crates/egui-wgpu/" }
+egui_glow = { path = "../egui/crates/egui_glow/" }
+egui_extras = { path = "../egui/crates/egui_extras/" }
+egui_kittest = { path = "../egui/crates/egui_kittest/" }
+egui_system_font_provider = { path = "../egui/crates/egui_system_font_provider/" }
+eframe = { path = "../egui/crates/eframe/" }
+egui_demo_lib = { path = "../egui/crates/egui_demo_lib/" }
+egui_inspection = { path = "../egui/crates/egui_inspection/" }
+winit = { path = "../winit/" }
