@@ -30,7 +30,7 @@ public class W3 {
 if (Test-Path $json) { Remove-Item $json -Force }
 if ($Tonemap -ne '') { $env:LOCALPLAYER_HDR_TONEMAP = $Tonemap } else { Remove-Item Env:LOCALPLAYER_HDR_TONEMAP -ErrorAction SilentlyContinue }
 
-$proc = Start-Process -FilePath $exe -ArgumentList @($Media) -PassThru
+$proc = Start-Process -FilePath $exe -ArgumentList ('"' + $Media + '"') -PassThru
 Start-Sleep -Seconds 5
 $proc.Refresh()
 $hwnd = $proc.MainWindowHandle

@@ -54,7 +54,7 @@ function Shot([string]$path, [int]$l, [int]$t, [int]$w, [int]$h) {
 if (Test-Path $json) { Remove-Item $json -Force }
 
 $env:LOCALPLAYER_STATS = $csv
-$proc = Start-Process -FilePath $exe -ArgumentList @($media) -PassThru
+$proc = Start-Process -FilePath $exe -ArgumentList ('"' + $media + '"') -PassThru
 Start-Sleep -Seconds 6
 $proc.Refresh()
 $hwnd = $proc.MainWindowHandle
