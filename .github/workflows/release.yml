@@ -91,9 +91,12 @@ jobs:
           cp packaging/arch/PKGBUILD "$work/"
           cp "dist/release/local-player-rs-$version-linux-x86_64.tar.gz" "$work/local-player-rs-$version-linux-x86_64.tar.gz"
           # Fonte local (a URL da release ainda não existe neste ponto do
-          # pipeline) + checksum REAL do artefato em vez de SKIP.
+          # pipeline) + checksum REAL do artefato em vez de SKIP. O pkgver do
+          # PKGBUILD é carimbado da versão do app: a fonte precisa ser o mesmo
+          # tarball que o job linux nomeou, e o commit de bump pode esquecer o
+          # PKGBUILD (aconteceu na v0.6.0).
           sha=$(sha256sum "$work/local-player-rs-$version-linux-x86_64.tar.gz" | cut -d' ' -f1)
-          sed -i "s|^source=.*|source=(\"local-player-rs-\$pkgver-linux-x86_64.tar.gz\")|; s|^sha256sums=.*|sha256sums=('$sha')|" "$work/PKGBUILD"
+          sed -i "s|^pkgver=.*|pkgver=$version|; s|^source=.*|source=(\"local-player-rs-\$pkgver-linux-x86_64.tar.gz\")|; s|^sha256sums=.*|sha256sums=('$sha')|" "$work/PKGBUILD"
           chown -R builder "$work"
           cd "$work"
           su builder -c 'makepkg --noconfirm --noprogressbar -d'
