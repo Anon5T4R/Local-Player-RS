@@ -26,6 +26,8 @@ const LOCAL_PLAYER_RS: App = App {
     former_ids: &[],
     former_names: &[],
     icon_png: None,
+    accent: None,
+    developer: "Anon5T4R",
     publisher: "Local Player RS contributors",
 };
 

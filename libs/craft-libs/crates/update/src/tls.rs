@@ -1,14 +1,14 @@
-//! // local-player-rs: provider cripto do rustls no caminho do craft-update.
+//! // craft-update: provider cripto do rustls no caminho do craft-update.
 //!
-//! Experimento do Local Player RS (não é padrão da suíte): as requisições de update (check de
+//! As requisições de update (check de
 //! release e download do instalador) usam o provider **100% Rust** (`rustls-rustcrypto`, fork
 //! vendored em `libs/rustls-rustcrypto`) como caminho **ÚNICO**. Um handshake que falhe vira erro
 //! normal - visível na linha de status do app (botão "Verificar atualizações") e no log de sessão -
 //! em vez de cair calado para outro provider.
 //!
-//! Não existe válvula de fallback: nenhum provider C (`ring`/`aws-lc-rs`) é compilado no app. Se um
-//! servidor do release parar de negociar com este provider, o erro aparece no app (e no log) em vez
-//! de ser mascarado por um retry silencioso em outro backend.
+//! Não existe válvula de fallback: nenhum provider C (`ring`/`aws-lc-rs`) é compilado no caminho do
+//! update. Se um servidor do release parar de negociar com este provider, o erro aparece no app (e
+//! no log) em vez de ser mascarado por um retry silencioso em outro backend.
 
 use std::sync::Arc;
 
@@ -25,9 +25,9 @@ pub fn status_line() -> String {
     "tls_provider=pure".into()
 }
 
-/// Diagnóstico do teste ignorado do app (`tests/tls_update_check.rs`): um
-/// handshake real com `host:443` usando o provider puro, devolvendo a versão de
-/// protocolo e a suite que o servidor negociou. Não é chamado em produção.
+/// Diagnóstico para um teste de app (`tests/tls_update_check.rs`, opcional): um handshake real com
+/// `host:443` usando o provider puro, devolvendo a versão de protocolo e a suite que o servidor
+/// negociou. Não é chamado em produção.
 pub fn probe_pure(host: &str) -> Result<String, String> {
     let provider = pure_provider();
     let verifier = rustls_platform_verifier::Verifier::new(provider.clone()).map_err(|e| format!("verifier: {e}"))?;
@@ -53,7 +53,7 @@ pub fn probe_pure(host: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// O log de sessão identifica o caminho único (não existe mais `fallback(...)`).
+    /// O log de sessão identifica o caminho único.
     #[test]
     fn the_session_line_names_the_single_provider() {
         assert_eq!(status_line(), "tls_provider=pure");

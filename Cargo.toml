@@ -64,7 +64,7 @@ pollster = "1.0"
 # Atualização: craft_update (libs/craft-libs) — check no GitHub, prompt egui e
 # self-update (Windows: MSI/portable; Linux: AppImage/tar.gz). O `egui` liga o
 # prompt e o Updater de UI.
-craft-update = { path = "libs/craft-libs/crates/update", features = ["egui"] }
+craft-update = { path = "libs/craft-libs/crates/update", features = ["egui", "icons"] }
 # Motor de decode (fase 2): containers + codecs clean-room do FilmCraft
 # (vendored em libs/filmcraft) e o bootstrap de áudio do symphonia.
 filmcraft-codecs = { path = "libs/filmcraft/crates/codecs" }
